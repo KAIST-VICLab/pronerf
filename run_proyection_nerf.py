@@ -30,6 +30,138 @@ np.random.seed(0)
 DEBUG = False
 
 
+def config_parser():
+    import configargparse
+    parser = configargparse.ArgumentParser()
+    parser.add_argument('--config', is_config_file=True, default='configs/fern.txt',
+                        help='config file path')
+    parser.add_argument("--expname", type=str,
+                        help='experiment name')
+    parser.add_argument("--basedir", type=str, default='./logs_minmax/',
+                        help='where to store ckpts and logs')
+    parser.add_argument("--datadir", type=str, default='./data/llff/fern',
+                        help='input data directory')
+
+    # training options
+    parser.add_argument("--netdepth", type=int, default=8,
+                        help='layers in network')
+    parser.add_argument("--netwidth", type=int, default=256,
+                        help='channels per layer')
+    parser.add_argument("--netskips", type=int, default=[4], nargs='*',
+                        help='skip connection layers')
+    parser.add_argument("--a_mmrgb", type=float, default=0,
+                        help='weight for mm rgb loss')
+    parser.add_argument("--a_mmdisp", type=float, default=0,
+                        help='weight for mm disp loss')
+    parser.add_argument("--mmnetdepth", type=int, default=8,
+                        help='layers in mm network')
+    parser.add_argument("--mmnetwidth", type=int, default=256,
+                        help='channels per layer')
+    parser.add_argument("--mmnetskips", type=int, default=[4], nargs='*',
+                        help='skip connection layers')
+    parser.add_argument("--netdepth_fine", type=int, default=8,
+                        help='layers in fine network')
+    parser.add_argument("--netwidth_fine", type=int, default=256,
+                        help='channels per layer in fine network')
+    parser.add_argument("--N_rand", type=int, default=32 * 32 * 4,
+                        help='batch size (number of random rays per gradient step)')
+    parser.add_argument("--lrate", type=float, default=5e-4,
+                        help='learning rate')
+    parser.add_argument("--weight_decay", type=float, default=0.0,
+                        help='regularization on weights')
+    parser.add_argument("--lrate_decay", type=int, default=250,
+                        help='exponential learning rate decay (in 1000 steps)')
+    parser.add_argument("--chunk", type=int, default=1024 * 32,
+                        help='number of rays processed in parallel, decrease if running out of memory')
+    parser.add_argument("--netchunk", type=int, default=1024 * 64,
+                        help='number of pts sent through network in parallel, decrease if running out of memory')
+    parser.add_argument("--no_batching", action='store_true',
+                        help='only take random rays from 1 image at a time')
+    parser.add_argument("--full_image", action='store_true',
+                        help='train with full image')
+    parser.add_argument("--no_reload", action='store_true',
+                        help='do not reload weights from saved ckpt')
+    parser.add_argument("--ft_path", type=str, default=None,
+                        help='specific weights npy file to reload for coarse network')
+
+    # rendering options
+    parser.add_argument("--N_samples", type=int, default=64,
+                        help='number of coarse samples per ray')
+    parser.add_argument("--N_importance", type=int, default=0,
+                        help='number of additional fine samples per ray')
+    parser.add_argument("--N_point_ray_enc", type=int, default=32,
+                        help='number of points to represent a ray')
+    parser.add_argument("--mm_emb", action='store_true',
+                        help='embed ray point encoding')
+    parser.add_argument("--perturb", type=float, default=1.,
+                        help='set to 0. for no jitter, 1. for jitter')
+    parser.add_argument("--use_viewdirs", action='store_true',
+                        help='use full 5D input instead of 3D')
+    parser.add_argument("--i_embed", type=int, default=0,
+                        help='set 0 for default positional encoding, -1 for none')
+    parser.add_argument("--multires", type=int, default=10,
+                        help='log2 of max freq for positional encoding (3D location)')
+    parser.add_argument("--multires_views", type=int, default=4,
+                        help='log2 of max freq for positional encoding (2D direction)')
+    parser.add_argument("--raw_noise_std", type=float, default=0.,
+                        help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
+
+    parser.add_argument("--render_only", action='store_true',
+                        help='do not optimize, reload weights and render out render_poses path')
+    parser.add_argument("--render_test", action='store_true',
+                        help='render the test set instead of render_poses path')
+    parser.add_argument("--render_factor", type=int, default=0,
+                        help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
+
+    # training options
+    parser.add_argument("--precrop_iters", type=int, default=0,
+                        help='number of steps to train on central crops')
+    parser.add_argument("--precrop_frac", type=float,
+                        default=.5, help='fraction of img taken for central crops')
+
+    # dataset options
+    parser.add_argument("--dataset_type", type=str, default='llff',
+                        help='options: llff / blender / deepvoxels')
+    parser.add_argument("--testskip", type=int, default=8,
+                        help='will load 1/N images from test/val sets, useful for large datasets like deepvoxels')
+
+    ## deepvoxels flags
+    parser.add_argument("--shape", type=str, default='greek',
+                        help='options : armchair / cube / greek / vase')
+
+    ## blender flags
+    parser.add_argument("--white_bkgd", action='store_true',
+                        help='set to render synthetic data on a white bkgd (always use for dvoxels)')
+    parser.add_argument("--half_res", action='store_true',
+                        help='load blender synthetic data at 400x400 instead of 800x800')
+
+    ## llff flags
+    parser.add_argument("--factor", type=int, default=8,
+                        help='downsample factor for LLFF images')
+    parser.add_argument("--no_ndc", action='store_true',
+                        help='do not use normalized device coordinates (set for non-forward facing scenes)')
+    parser.add_argument("--lindisp", action='store_true',
+                        help='sampling linearly in disparity rather than depth')
+    parser.add_argument("--spherify", action='store_true',
+                        help='set for spherical 360 scenes')
+    parser.add_argument("--llffhold", type=int, default=8,
+                        help='will take every 1/N images as LLFF test set, paper uses 8')
+
+    # logging/saving options
+    parser.add_argument("--i_print", type=int, default=5000,
+                        help='frequency of console printout and metric loggin')
+    parser.add_argument("--i_img", type=int, default=10000,
+                        help='frequency of tensorboard image logging')
+    parser.add_argument("--i_weights", type=int, default=10000,
+                        help='frequency of weight ckpt saving')
+    parser.add_argument("--i_testset", type=int, default=10000,
+                        help='frequency of testset saving')
+    parser.add_argument("--i_video", type=int, default=10000,
+                        help='frequency of render_poses video saving')
+
+    return parser
+
+
 def batchify(fn, chunk):
     """Constructs a version of 'fn' that applies to smaller batches.
     """
@@ -59,7 +191,7 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64
     return outputs
 
 
-def render(H, h, W, w, K, coords=None, chunk=1024 * 32, rays=None, c2w=None, ndc=True,
+def render(H, h, W, w, K, ref_K, coords=None, chunk=1024 * 32, rays=None, c2w=None, ndc=True,
            target_pose=None, ref_poses=None, ref_rgbs=None,
            near=0., far=1.,
            use_viewdirs=False, c2w_staticcam=None,
@@ -122,12 +254,12 @@ def render(H, h, W, w, K, coords=None, chunk=1024 * 32, rays=None, c2w=None, ndc
         rays = torch.cat([rays, viewdirs], -1)
 
     # Render and reshape
-    all_ret = render_rays(rays, coords, target_pose, ref_poses, ref_rgbs, K, h, w, **kwargs)
+    all_ret = render_rays(rays, coords, target_pose, ref_poses, ref_rgbs, h, w, ref_K, **kwargs)
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
 
-    k_extract = ['rgb_map0', 'rgb_map1', 'disp_map', 'mean_warp', 'warps']
+    k_extract = ['rgb_map0', 'rgb_map1', 'disp_map', 'mean_warp']
     ret_list = [all_ret[k] for k in k_extract]
     ret_dict = {k: all_ret[k] for k in all_ret if k not in k_extract}
     return ret_list + [ret_dict]
@@ -145,23 +277,22 @@ def render_path(render_poses, hwf, K, chunk, ref_poses, ref_rgbs, render_kwargs,
 
     rgbs0 = []
     rgbs1 = []
-    mins = []
-    maxs = []
-    dsts = []
+    disps = []
+    mean_warps = []
     psnrs = []
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
-        print(i, time.time() - t)
+        # print(i, time.time() - t)
         t = time.time()
-        rgb0, rgb1, min_ray, max_ray, dst, extras = render(H, H, W, W, K, target_pose=c2w, ref_poses=ref_poses,
-                                                           ref_rgbs=ref_rgbs, chunk=chunk, c2w=c2w[:3, :4],
-                                                           **render_kwargs)
+        rgb0, rgb1, disp, mean_warp, extras = render(H, H, W, W, K, torch.Tensor(K.copy()).to(device),
+                                                       target_pose=c2w, ref_poses=ref_poses,
+                                                       ref_rgbs=ref_rgbs, chunk=chunk, c2w=c2w[:3, :4],
+                                                       **render_kwargs)
         rgbs0.append(rgb0.cpu().numpy())
         rgbs1.append(rgb1.cpu().numpy())
-        mins.append(min_ray.cpu().numpy())
-        maxs.append(max_ray.cpu().numpy())
-        dsts.append(dst.cpu().numpy())
+        disps.append(disp.cpu().numpy())
+        mean_warps.append(mean_warp.cpu().numpy())
 
         # if i == 0:
         #     print(rgb0.shape)
@@ -177,9 +308,8 @@ def render_path(render_poses, hwf, K, chunk, ref_poses, ref_rgbs, render_kwargs,
 
     rgbs0 = np.stack(rgbs0, 0)
     rgbs1 = np.stack(rgbs1, 0)
-    mins = np.stack(mins, 0)
-    maxs = np.stack(maxs, 0)
-    dsts = np.stack(dsts, 0)
+    disps = np.stack(disps, 0)
+    mean_warps = np.stack(mean_warps, 0)
 
     if len(psnrs) > 0:
         mean_psnr = 0
@@ -187,7 +317,7 @@ def render_path(render_poses, hwf, K, chunk, ref_poses, ref_rgbs, render_kwargs,
             mean_psnr = mean_psnr + this_psnr / len(psnrs)
         print(f'Mean Test PSNR {mean_psnr.detach().item()}')
 
-    return rgbs0, rgbs1, mins, maxs, dsts
+    return rgbs0, rgbs1, disps, mean_warps
 
 
 def create_nerf(args):
@@ -370,7 +500,7 @@ def compute_disp_and_mmrgb(
     return mm_rgb, disp
 
 
-def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, K, H, W,
+def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, H, W, K,
                 network_fn,
                 network_query_fn,
                 N_samples,
@@ -429,161 +559,39 @@ def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, K, H, W,
     # Do warping
     # TODO
     warps = []
+    # print(f'ref_rgbs shape {ref_rgbs.shape}')
     ref_rgbs = ref_rgbs.view(ref_rgbs.shape[0], H, W, 3)
     ref_rgbs = torch.permute(ref_rgbs, (0, 3, 1, 2))
-    depth = 1/(disp + 1e-7)
+    depth = 1 / (disp + 1e-7)
     depth = depth.view(1, H, W)
     K = K.unsqueeze(0)
+    target_R = target_pose[None, :, 0:3]
+    target_t = target_pose[None, :, 3, None]
     for i in range(ref_rgbs.shape[0]):
-        R_trans_ref = torch.transpose(ref_poses[i, None, :, 0:3], 1, 2)
-        pose_R = torch.bmm(R_trans_ref, target_pose[None, :, 0:3])
-        pose_t = 0*torch.bmm(R_trans_ref, target_pose[None, :, 3, None] - ref_poses[i, None, :, 3, None])
+        ref_R = ref_poses[i, None, :, 0:3]
+        ref_t = ref_poses[i, None, :, 3, None]
+
+        R_trans = torch.transpose(target_R, 1, 2)
+        pose_R = torch.bmm(R_trans, ref_R)
+        pose_t = torch.bmm(R_trans, ref_t - target_t)
         pose = torch.cat((pose_R, pose_t), 2)
+
         warps.append(inverse_warp.inverse_warp_rt(ref_rgbs[i, None], depth, pose, K, torch.inverse(K),
                                                   padding_mode='zeros'))
-    warps = torch.stack(warps, 0)
+    warps = torch.cat(warps, 0)
     warps = torch.permute(warps, (0, 2, 3, 1))
     mean_warp = torch.mean(warps, 0)
 
-    ret = {'rgb_map0': mm_rgb[0], 'rgb_map1': mm_rgb[1], 'disp_map':disp, 'mean_warp':mean_warp, 'warps':warps}
+    ret = {'rgb_map0': mm_rgb[0], 'rgb_map1': mm_rgb[1], 'disp_map':disp, 'mean_warp':mean_warp.view(-1, 3)}
+
+    for i in range(warps.shape[0]):
+        ret[f'warp_{i}'] = warps[i].view(-1, 3)
 
     for k in ret:
         if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
             print(f"! [Numerical Error] {k} contains nan or inf.")
 
     return ret
-
-
-def config_parser():
-    import configargparse
-    parser = configargparse.ArgumentParser()
-    parser.add_argument('--config', is_config_file=True, default='configs/fern.txt',
-                        help='config file path')
-    parser.add_argument("--expname", type=str,
-                        help='experiment name')
-    parser.add_argument("--basedir", type=str, default='./logs_minmax/',
-                        help='where to store ckpts and logs')
-    parser.add_argument("--datadir", type=str, default='./data/llff/fern',
-                        help='input data directory')
-
-    # training options
-    parser.add_argument("--netdepth", type=int, default=8,
-                        help='layers in network')
-    parser.add_argument("--netwidth", type=int, default=256,
-                        help='channels per layer')
-    parser.add_argument("--netskips", type=int, default=[4], nargs='*',
-                        help='skip connection layers')
-    parser.add_argument("--a_mmrgb", type=float, default=0,
-                        help='weight for mm rgb loss')
-    parser.add_argument("--a_mmdisp", type=float, default=0,
-                        help='weight for mm disp loss')
-    parser.add_argument("--mmnetdepth", type=int, default=8,
-                        help='layers in mm network')
-    parser.add_argument("--mmnetwidth", type=int, default=256,
-                        help='channels per layer')
-    parser.add_argument("--mmnetskips", type=int, default=[4], nargs='*',
-                        help='skip connection layers')
-    parser.add_argument("--netdepth_fine", type=int, default=8,
-                        help='layers in fine network')
-    parser.add_argument("--netwidth_fine", type=int, default=256,
-                        help='channels per layer in fine network')
-    parser.add_argument("--N_rand", type=int, default=32 * 32 * 4,
-                        help='batch size (number of random rays per gradient step)')
-    parser.add_argument("--lrate", type=float, default=5e-4,
-                        help='learning rate')
-    parser.add_argument("--weight_decay", type=float, default=0.0,
-                        help='regularization on weights')
-    parser.add_argument("--lrate_decay", type=int, default=250,
-                        help='exponential learning rate decay (in 1000 steps)')
-    parser.add_argument("--chunk", type=int, default=1024 * 32,
-                        help='number of rays processed in parallel, decrease if running out of memory')
-    parser.add_argument("--netchunk", type=int, default=1024 * 64,
-                        help='number of pts sent through network in parallel, decrease if running out of memory')
-    parser.add_argument("--no_batching", action='store_true',
-                        help='only take random rays from 1 image at a time')
-    parser.add_argument("--full_image", action='store_true',
-                        help='train with full image')
-    parser.add_argument("--no_reload", action='store_true',
-                        help='do not reload weights from saved ckpt')
-    parser.add_argument("--ft_path", type=str, default=None,
-                        help='specific weights npy file to reload for coarse network')
-
-    # rendering options
-    parser.add_argument("--N_samples", type=int, default=64,
-                        help='number of coarse samples per ray')
-    parser.add_argument("--N_importance", type=int, default=0,
-                        help='number of additional fine samples per ray')
-    parser.add_argument("--N_point_ray_enc", type=int, default=32,
-                        help='number of points to represent a ray')
-    parser.add_argument("--mm_emb", action='store_true',
-                        help='embed ray point encoding')
-    parser.add_argument("--perturb", type=float, default=1.,
-                        help='set to 0. for no jitter, 1. for jitter')
-    parser.add_argument("--use_viewdirs", action='store_true',
-                        help='use full 5D input instead of 3D')
-    parser.add_argument("--i_embed", type=int, default=0,
-                        help='set 0 for default positional encoding, -1 for none')
-    parser.add_argument("--multires", type=int, default=10,
-                        help='log2 of max freq for positional encoding (3D location)')
-    parser.add_argument("--multires_views", type=int, default=4,
-                        help='log2 of max freq for positional encoding (2D direction)')
-    parser.add_argument("--raw_noise_std", type=float, default=0.,
-                        help='std dev of noise added to regularize sigma_a output, 1e0 recommended')
-
-    parser.add_argument("--render_only", action='store_true',
-                        help='do not optimize, reload weights and render out render_poses path')
-    parser.add_argument("--render_test", action='store_true',
-                        help='render the test set instead of render_poses path')
-    parser.add_argument("--render_factor", type=int, default=0,
-                        help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
-
-    # training options
-    parser.add_argument("--precrop_iters", type=int, default=0,
-                        help='number of steps to train on central crops')
-    parser.add_argument("--precrop_frac", type=float,
-                        default=.5, help='fraction of img taken for central crops')
-
-    # dataset options
-    parser.add_argument("--dataset_type", type=str, default='llff',
-                        help='options: llff / blender / deepvoxels')
-    parser.add_argument("--testskip", type=int, default=8,
-                        help='will load 1/N images from test/val sets, useful for large datasets like deepvoxels')
-
-    ## deepvoxels flags
-    parser.add_argument("--shape", type=str, default='greek',
-                        help='options : armchair / cube / greek / vase')
-
-    ## blender flags
-    parser.add_argument("--white_bkgd", action='store_true',
-                        help='set to render synthetic data on a white bkgd (always use for dvoxels)')
-    parser.add_argument("--half_res", action='store_true',
-                        help='load blender synthetic data at 400x400 instead of 800x800')
-
-    ## llff flags
-    parser.add_argument("--factor", type=int, default=8,
-                        help='downsample factor for LLFF images')
-    parser.add_argument("--no_ndc", action='store_true',
-                        help='do not use normalized device coordinates (set for non-forward facing scenes)')
-    parser.add_argument("--lindisp", action='store_true',
-                        help='sampling linearly in disparity rather than depth')
-    parser.add_argument("--spherify", action='store_true',
-                        help='set for spherical 360 scenes')
-    parser.add_argument("--llffhold", type=int, default=8,
-                        help='will take every 1/N images as LLFF test set, paper uses 8')
-
-    # logging/saving options
-    parser.add_argument("--i_print", type=int, default=5000,
-                        help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img", type=int, default=10000,
-                        help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=10000,
-                        help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=10000,
-                        help='frequency of testset saving')
-    parser.add_argument("--i_video", type=int, default=10000,
-                        help='frequency of render_poses video saving')
-
-    return parser
 
 
 def train():
@@ -803,7 +811,7 @@ def train():
             ref_K[1, 2] = K_ten[1, 2] - y1
 
         th, tw, _ = coords.shape
-        print(f'coords shape {coords.shape}')
+        # print(f'coords shape {coords.shape}')
         coords = torch.reshape(coords, [-1, 2])  # (H * W, 2)
         select_coords = coords.long()  # (N_rand, 2)
         rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
@@ -814,22 +822,34 @@ def train():
         # print(f'reference RGBs shape {ref_rgb.shape}')
 
         #####  Core optimization loop  #####
-        rgb0, rgb1, disp, mean_warp, warps, extras = render(H, th, W, tw, K, target_pose=pose, ref_poses=ref_poses,
-                                                            ref_rgbs=ref_rgbs, coords=coords.type_as(batch_rays)/W,
-                                                            chunk=args.chunk, rays=batch_rays, verbose=i < 10,
-                                                            retraw=True, **render_kwargs_train)
+        rgb0, rgb1, disp, mean_warp, extras = render(H, th, W, tw, K, ref_K, target_pose=pose, ref_poses=ref_poses,
+                                                     ref_rgbs=ref_rgbs, coords=coords.type_as(batch_rays)/W,
+                                                     chunk=args.chunk, rays=batch_rays, verbose=i < 10,
+                                                     retraw=True, **render_kwargs_train)
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb1, target_s)
 
-        # if i == 10000:
-        #     rgb8 = to8b(target_s.view(th, tw, 3).detach().cpu().numpy())
-        #     filename = os.path.join(basedir, expname, 'check_target.png')
-        #     imageio.imwrite(filename, rgb8)
-        #
-        #     rgb8 = to8b(rgb1.view(th, tw, 3).detach().cpu().numpy())
-        #     filename = os.path.join(basedir, expname, 'check_sinth.png')
-        #     imageio.imwrite(filename, rgb8)
+        warp_loss = 0
+        for i in range(ref_rgbs.shape[0]):
+            warp_loss += img2mse(extras[f'warp_{i}'], target_s)
+
+        if i == 1000:
+            rgb8 = to8b(target_s.view(th, tw, 3).detach().cpu().numpy())
+            filename = os.path.join(basedir, expname, 'check_target.png')
+            imageio.imwrite(filename, rgb8)
+
+            rgb8 = to8b(rgb1.view(th, tw, 3).detach().cpu().numpy())
+            filename = os.path.join(basedir, expname, 'check_sinth.png')
+            imageio.imwrite(filename, rgb8)
+
+            rgb8 = to8b(extras['warp_0'].view(th, tw, 3).detach().cpu().numpy())
+            filename = os.path.join(basedir, expname, 'check_warp.png')
+            imageio.imwrite(filename, rgb8)
+
+            rgb8 = to8b(extras['warp_5'].view(th, tw, 3).detach().cpu().numpy())
+            filename = os.path.join(basedir, expname, 'check_warp1.png')
+            imageio.imwrite(filename, rgb8)
 
         perc_loss = 0
         if a_p > 0 and i >= a_sch:
@@ -838,7 +858,7 @@ def train():
             target_img_ = torch.permute(target_s.view(th, tw, 3).clone(), (2, 0, 1)).unsqueeze(0)
             perc_loss = a_p * perceptual_loss(vgg(rgb_predicted_), vgg(target_img_))
 
-        loss = img_loss + img2mse(rgb0, target_s) + perc_loss
+        loss = img_loss + img2mse(rgb0, target_s) + perc_loss + warp_loss
         psnr = mse2psnr(img_loss)
 
         loss.backward()
