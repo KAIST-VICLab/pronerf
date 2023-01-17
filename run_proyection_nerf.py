@@ -148,15 +148,15 @@ def config_parser():
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
     # logging/saving options
-    parser.add_argument("--i_print", type=int, default=2500,
+    parser.add_argument("--i_print", type=int, default=5000,
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img", type=int, default=5000,
+    parser.add_argument("--i_img", type=int, default=10000,
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=5000,
+    parser.add_argument("--i_weights", type=int, default=10000,
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=5000,
+    parser.add_argument("--i_testset", type=int, default=10000,
                         help='frequency of testset saving')
-    parser.add_argument("--i_video", type=int, default=5000,
+    parser.add_argument("--i_video", type=int, default=10000,
                         help='frequency of render_poses video saving')
 
     return parser
@@ -563,37 +563,17 @@ def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, H, W, K,
     # 3. Get camera coordinates in c2: c2 = R2'w + (-R2't2)
     # 4. Get pixel coordinates in c2: p2 = Kc2 / c2[z]
     # Combine 2 and 3: c2 = R2'(R1c1 + t1) + (-R2't2) = R2'R1c1 + R2't1 + (-R2't2) =  R2'R1c1 + R2'(t1 - t2)
+    # combine with 4: p2 = K(R2'R1c1 + R2'(t1 - t2)) / c2[z] = (KR2'R1c1 + KR2'(t1 - t2))) / c2[z]
 
     # print(f'ref_rgbs shape {ref_rgbs.shape}')
     ref_rgbs = ref_rgbs.view(ref_rgbs.shape[0], H, W, 3)
     ref_rgbs = torch.permute(ref_rgbs, (0, 3, 1, 2))
     depth_ = depth.view(1, H, W).repeat(ref_rgbs.shape[0], 1, 1)
     K = K.unsqueeze(0).repeat(ref_rgbs.shape[0], 1, 1)
+    inv_K = torch.inverse(K)
     target_pose = target_pose.unsqueeze(0).repeat(ref_rgbs.shape[0], 1, 1)
 
-    # c2w poses
-    target_R = target_pose[:, :, 0:3]
-    target_t = target_pose[:, :, 3, None]
-    ref_R = ref_poses[:, :, 0:3]
-    ref_t = ref_poses[:, :, 3, None]
-
-    # w2c pose
-    # target_R = torch.transpose(target_R, 1, 2)
-    # target_t = -torch.bmm(target_R, target_t)
-    # ref_R = torch.transpose(ref_R, 1, 2)
-    # ref_t = -torch.bmm(ref_R, ref_t)
-
-    R_trans = torch.transpose(ref_R, 2, 1)
-    pose_R = torch.bmm(R_trans, target_R)
-    pose_t = torch.bmm(R_trans, -target_t + ref_t)
-    poses = torch.cat((pose_R, pose_t), 2)
-
-    # R_trans = torch.transpose(target_R, 1, 2)
-    # pose_R = torch.bmm(R_trans, ref_R)
-    # pose_t = torch.bmm(R_trans, ref_t - target_t)
-    # poses = torch.cat((pose_R, pose_t), 2)
-
-    warps = inverse_warp.inverse_warp_rt(ref_rgbs, depth_, poses, K, torch.inverse(K), padding_mode='zeros')
+    warps = inverse_warp.inverse_warp_rt1_rt2(ref_rgbs, depth_, target_pose, ref_poses, K, inv_K, padding_mode='zeros')
     warps = torch.permute(warps, (0, 2, 3, 1))
     mean_warp = torch.mean(warps, 0)
 
@@ -849,27 +829,30 @@ def train():
         warp_loss = 0
         for num_ref in range(ref_rgbs.shape[0]):
             this_warped_view = extras[f'warp_{num_ref}']
-            valid_warp = this_warped_view.detach() != 0
-            if torch.sum(valid_warp.type_as(this_warped_view)) > 0:
-                warp_loss += img2mse(this_warped_view[valid_warp], target_s[valid_warp])
+            valid_warp = (this_warped_view.detach() != 0).type_as(this_warped_view)
+            warp_loss += torch.mean(valid_warp * (this_warped_view - target_s) ** 2)
         warp_loss = warp_loss / ref_rgbs.shape[0]
 
-        if i % 5000 == 0:
+        if i % 500 == 0:
+            if not os.path.exists(os.path.join(basedir, expname, 'debug')):
+                os.makedirs(os.path.join(basedir, expname, 'debug'))
+
             rgb8 = to8b(target_s.view(th, tw, 3).detach().cpu().numpy())
-            filename = os.path.join(basedir, expname, 'check_target.png')
+            filename = os.path.join(basedir, expname, 'debug', 'check_target.png')
             imageio.imwrite(filename, rgb8)
 
             rgb8 = to8b(rgb1.view(th, tw, 3).detach().cpu().numpy())
-            filename = os.path.join(basedir, expname, 'check_sinth.png')
+            filename = os.path.join(basedir, expname, 'debug', 'check_sinth.png')
             imageio.imwrite(filename, rgb8)
 
-            rgb8 = to8b(depth.view(th, tw).detach().cpu().numpy())
-            filename = os.path.join(basedir, expname, 'check_depth.png')
+            np_depth = depth.view(th, tw).detach().cpu().numpy()
+            rgb8 = to8b(np_depth / np.percentile(np_depth, 99))
+            filename = os.path.join(basedir, expname, 'debug', 'check_depth.png')
             imageio.imwrite(filename, rgb8)
 
             for num_ref in range(ref_rgbs.shape[0]):
                 rgb8 = to8b(extras[f'warp_{num_ref}'].view(th, tw, 3).detach().cpu().numpy())
-                filename = os.path.join(basedir, expname, f'check_warp_{num_ref}.png')
+                filename = os.path.join(basedir, expname, 'debug', f'check_warp_{num_ref}.png')
                 imageio.imwrite(filename, rgb8)
 
         perc_loss = 0
