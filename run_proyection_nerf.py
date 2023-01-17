@@ -495,7 +495,7 @@ def compute_disp_and_mmrgb(
         disp_mmrgb = mm_model(mm_input)
 
     disp = torch.relu(disp_mmrgb[0][:, 0, None]) * (10 - 0.1) + 0.1
-    mm_rgb = [disp_mmrgb[0][:, -3::], disp_mmrgb[1][:, 3::]]
+    mm_rgb = [disp_mmrgb[0][:, -3::], disp_mmrgb[1][:, -3::]]
 
     return mm_rgb, disp
 
@@ -583,6 +583,7 @@ def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, H, W, K,
     mean_warp = torch.mean(warps, 0)
 
     ret = {'rgb_map0': mm_rgb[0], 'rgb_map1': mm_rgb[1], 'disp_map':disp, 'mean_warp':mean_warp.view(-1, 3)}
+    # print(f'rgb1 shape {mm_rgb[1].shape}')
 
     for i in range(warps.shape[0]):
         ret[f'warp_{i}'] = warps[i].view(-1, 3)
@@ -826,6 +827,7 @@ def train():
                                                      ref_rgbs=ref_rgbs, coords=coords.type_as(batch_rays)/W,
                                                      chunk=args.chunk, rays=batch_rays, verbose=i < 10,
                                                      retraw=True, **render_kwargs_train)
+        # print(f'rgb1 shape {rgb1.shape}')
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb1, target_s)
@@ -834,7 +836,7 @@ def train():
         for num_ref in range(ref_rgbs.shape[0]):
             warp_loss += img2mse(extras[f'warp_{num_ref}'], target_s)
 
-        if i == 1000:
+        if i == 10000:
             rgb8 = to8b(target_s.view(th, tw, 3).detach().cpu().numpy())
             filename = os.path.join(basedir, expname, 'check_target.png')
             imageio.imwrite(filename, rgb8)
