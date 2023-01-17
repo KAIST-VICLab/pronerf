@@ -1,0 +1,25 @@
+expname = fern_proy_nerf
+datadir = ./data/nerf_llff_data/fern
+dataset_type = llff
+
+factor = 4
+llffhold = 8
+
+N_rand = 1024
+N_samples = 4
+N_importance = 0
+
+use_viewdirs = True
+raw_noise_std = 1e0
+
+lrate = 1e-3
+a_mmrgb = 0.1
+a_mmdisp = 0.00
+mmnetdepth = 8
+mmnetwidth = 256
+mmnetskips = [10000]
+N_point_ray_enc = 32
+mm_emb = False
+precrop_iters = 0
+precrop_frac = 0.5
+weight_decay = 0e-7
