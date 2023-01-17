@@ -1,6 +1,6 @@
 import os, sys
 
-gpu_n = '1'
+gpu_n = '0'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 
@@ -831,8 +831,8 @@ def train():
         img_loss = img2mse(rgb1, target_s)
 
         warp_loss = 0
-        for i in range(ref_rgbs.shape[0]):
-            warp_loss += img2mse(extras[f'warp_{i}'], target_s)
+        for num_ref in range(ref_rgbs.shape[0]):
+            warp_loss += img2mse(extras[f'warp_{num_ref}'], target_s)
 
         if i == 1000:
             rgb8 = to8b(target_s.view(th, tw, 3).detach().cpu().numpy())
