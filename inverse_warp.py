@@ -256,6 +256,40 @@ def inverse_warp_rt(img, depth, pose, intrinsics, intrinsics_inv, padding_mode='
    return projected_img
 
 
+def inverse_warp_rt1_rt2(img, depth1, c2w1, c2w2, intrinsics, intrinsics_inv, padding_mode='zeros'):
+   """
+   Inverse warp a source image to the target image plane.
+
+   Args:
+       img: the source image (where to sample pixels) -- [B, 3, H, W]
+       depth: depth map of the target image -- [B, H, W]
+       pose: 6DoF pose parameters from target to source -- [B, 6]
+       intrinsics: camera intrinsic matrix -- [B, 3, 3]
+       intrinsics_inv: inverse of the intrinsic matrix -- [B, 3, 3]
+   Returns:
+       Source image warped to the target image plane
+   """
+   batch_size, _, img_height, img_width = img.size()
+
+   # Lift into 3D cam coordinates, pixel coordinates is p=[u,v,1]: c1 = Depth * K_invp1
+   cam_coords = pixel2cam(depth1, intrinsics_inv)  # [B,3,H,W]
+
+   # Get world coordinates from c1: w = R1c1 + t1
+   world_coords = cam_coords
+
+   # Get camera coordinates in c2: c2 = R2'w + (-R2't2)
+
+   # Get pixel coordinates in c2: p2 = Kc2 / c2[z]
+
+   # Get projection matrix for tgt camera frame to source pixel frame
+   proj_cam_to_src_pixel = intrinsics.bmm(c2w1)  # [B, 3, 4]
+
+   src_pixel_coords = cam2pixel(cam_coords, proj_cam_to_src_pixel[:,:,:3], proj_cam_to_src_pixel[:,:,-1:], padding_mode)  # [B,H,W,2]
+   projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode=padding_mode, align_corners=True)
+
+   return projected_img
+
+
 def inverse_warp_crop(img, depth, grid, scale, pose, intrinsics, intrinsics_inv, rotation_mode='euler', padding_mode='zeros'):
    """
    Inverse warp a source image to the target image plane.

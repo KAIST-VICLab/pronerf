@@ -1,6 +1,6 @@
 import os, sys
 
-gpu_n = '1'
+gpu_n = '0'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 
@@ -148,15 +148,15 @@ def config_parser():
                         help='will take every 1/N images as LLFF test set, paper uses 8')
 
     # logging/saving options
-    parser.add_argument("--i_print", type=int, default=5000,
+    parser.add_argument("--i_print", type=int, default=2500,
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img", type=int, default=10000,
+    parser.add_argument("--i_img", type=int, default=5000,
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=10000,
+    parser.add_argument("--i_weights", type=int, default=5000,
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=10000,
+    parser.add_argument("--i_testset", type=int, default=5000,
                         help='frequency of testset saving')
-    parser.add_argument("--i_video", type=int, default=10000,
+    parser.add_argument("--i_video", type=int, default=5000,
                         help='frequency of render_poses video saving')
 
     return parser
@@ -495,7 +495,8 @@ def compute_disp_and_mmrgb(
         disp_mmrgb = mm_model(mm_input)
 
     depth = torch.sigmoid(disp_mmrgb[0][:, 0, None]) * (far_thresh - near_thresh) + near_thresh
-    mm_rgb = [disp_mmrgb[0][:, -3::], disp_mmrgb[1][:, -3::]]
+    # depth = torch.relu(disp_mmrgb[0][:, 0, None])
+    mm_rgb = [disp_mmrgb[0][:, 1::], disp_mmrgb[1][:, 1::]]
 
     return mm_rgb, depth
 
@@ -557,32 +558,46 @@ def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, H, W, K,
         rays_o, rays_d, coords, near, far, min_max_ray_net, N_point_ray_enc, embed_fn, randomize)
 
     # Do warping
-    # TODO
-    warps = []
+    # 1. Lift into 3D cam coordinates, pixel coordinates is p=[u,v,1]: c1 = D1 * K_invp1
+    # 2. Get world coordinates from c1: w = R1c1 + t1
+    # 3. Get camera coordinates in c2: c2 = R2'w + (-R2't2)
+    # 4. Get pixel coordinates in c2: p2 = Kc2 / c2[z]
+    # Combine 2 and 3: c2 = R2'(R1c1 + t1) + (-R2't2) = R2'R1c1 + R2't1 + (-R2't2) =  R2'R1c1 + R2'(t1 - t2)
+
     # print(f'ref_rgbs shape {ref_rgbs.shape}')
     ref_rgbs = ref_rgbs.view(ref_rgbs.shape[0], H, W, 3)
     ref_rgbs = torch.permute(ref_rgbs, (0, 3, 1, 2))
     depth_ = depth.view(1, H, W).repeat(ref_rgbs.shape[0], 1, 1)
     K = K.unsqueeze(0).repeat(ref_rgbs.shape[0], 1, 1)
-    # print(f'K shape {K.shape}')
     target_pose = target_pose.unsqueeze(0).repeat(ref_rgbs.shape[0], 1, 1)
-    # print(f'target_pose shape {target_pose.shape}')
+
+    # c2w poses
     target_R = target_pose[:, :, 0:3]
     target_t = target_pose[:, :, 3, None]
     ref_R = ref_poses[:, :, 0:3]
     ref_t = ref_poses[:, :, 3, None]
 
-    R_trans = torch.transpose(ref_R, 1, 2)
+    # w2c pose
+    # target_R = torch.transpose(target_R, 1, 2)
+    # target_t = -torch.bmm(target_R, target_t)
+    # ref_R = torch.transpose(ref_R, 1, 2)
+    # ref_t = -torch.bmm(ref_R, ref_t)
+
+    R_trans = torch.transpose(ref_R, 2, 1)
     pose_R = torch.bmm(R_trans, target_R)
-    pose_t = torch.bmm(R_trans, target_t - ref_t)
+    pose_t = torch.bmm(R_trans, -target_t + ref_t)
     poses = torch.cat((pose_R, pose_t), 2)
+
+    # R_trans = torch.transpose(target_R, 1, 2)
+    # pose_R = torch.bmm(R_trans, ref_R)
+    # pose_t = torch.bmm(R_trans, ref_t - target_t)
+    # poses = torch.cat((pose_R, pose_t), 2)
 
     warps = inverse_warp.inverse_warp_rt(ref_rgbs, depth_, poses, K, torch.inverse(K), padding_mode='zeros')
     warps = torch.permute(warps, (0, 2, 3, 1))
     mean_warp = torch.mean(warps, 0)
 
     ret = {'rgb_map0': mm_rgb[0], 'rgb_map1': mm_rgb[1], 'depth_map':depth, 'mean_warp':mean_warp.view(-1, 3)}
-    # print(f'rgb1 shape {mm_rgb[1].shape}')
 
     for i in range(warps.shape[0]):
         ret[f'warp_{i}'] = warps[i].view(-1, 3)
@@ -802,13 +817,13 @@ def train():
                 print(f"[Config] Center cropping of size "
                       f"{2 * dH} x {2 * dW} is enabled until iter {args.precrop_iters}")
         else:
-            th, tw = 100, 100
+            th, tw = 200, 200
             x1 = random.randint(0, W - tw)
             y1 = random.randint(0, H - th)
             coords = coords[y1: y1 + th, x1: x1 + tw, :]
             ref_K = K_ten.clone()
-            ref_K[0, 2] = K_ten[0, 2] - x1
-            ref_K[1, 2] = K_ten[1, 2] - y1
+            ref_K[0, 2] = ref_K[0, 2] - x1
+            ref_K[1, 2] = ref_K[1, 2] - y1
 
         th, tw, _ = coords.shape
         # print(f'coords shape {coords.shape}')
@@ -833,10 +848,13 @@ def train():
 
         warp_loss = 0
         for num_ref in range(ref_rgbs.shape[0]):
-            warp_loss += img2mse(extras[f'warp_{num_ref}'], target_s)
+            this_warped_view = extras[f'warp_{num_ref}']
+            valid_warp = this_warped_view.detach() != 0
+            if torch.sum(valid_warp.type_as(this_warped_view)) > 0:
+                warp_loss += img2mse(this_warped_view[valid_warp], target_s[valid_warp])
         warp_loss = warp_loss / ref_rgbs.shape[0]
 
-        if i == 10000:
+        if i % 5000 == 0:
             rgb8 = to8b(target_s.view(th, tw, 3).detach().cpu().numpy())
             filename = os.path.join(basedir, expname, 'check_target.png')
             imageio.imwrite(filename, rgb8)
@@ -845,13 +863,14 @@ def train():
             filename = os.path.join(basedir, expname, 'check_sinth.png')
             imageio.imwrite(filename, rgb8)
 
-            rgb8 = to8b(extras['warp_0'].view(th, tw, 3).detach().cpu().numpy())
-            filename = os.path.join(basedir, expname, 'check_warp.png')
+            rgb8 = to8b(depth.view(th, tw).detach().cpu().numpy())
+            filename = os.path.join(basedir, expname, 'check_depth.png')
             imageio.imwrite(filename, rgb8)
 
-            rgb8 = to8b(extras['warp_5'].view(th, tw, 3).detach().cpu().numpy())
-            filename = os.path.join(basedir, expname, 'check_warp1.png')
-            imageio.imwrite(filename, rgb8)
+            for num_ref in range(ref_rgbs.shape[0]):
+                rgb8 = to8b(extras[f'warp_{num_ref}'].view(th, tw, 3).detach().cpu().numpy())
+                filename = os.path.join(basedir, expname, f'check_warp_{num_ref}.png')
+                imageio.imwrite(filename, rgb8)
 
         perc_loss = 0
         if a_p > 0 and i >= a_sch:
@@ -860,7 +879,7 @@ def train():
             target_img_ = torch.permute(target_s.view(th, tw, 3).clone(), (2, 0, 1)).unsqueeze(0)
             perc_loss = a_p * perceptual_loss(vgg(rgb_predicted_), vgg(target_img_))
 
-        loss = img_loss + img2mse(rgb0, target_s) + perc_loss + warp_loss
+        loss = img_loss + perc_loss + warp_loss #+ img2mse(rgb0, target_s)
         psnr = mse2psnr(img_loss)
 
         loss.backward()
@@ -909,6 +928,7 @@ def train():
             imageio.mimwrite(moviebase + 'rgb1.mp4', to8b(rgbs1), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths / np.percentile(depths, 99)), fps=30, quality=8)
+            print(f'Mean depth {np.mean(depths)}')
 
         # if args.use_viewdirs:
             #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
