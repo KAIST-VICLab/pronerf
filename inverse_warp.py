@@ -300,3 +300,55 @@ def inverse_warp_rt1_rt2(img, depth, c2w1, c2w2, intrinsics, intrinsics_inv, pad
                                                     align_corners=True)
 
     return projected_img
+
+
+def inverse_warp_rod1_rt2(img, depth, ro1, rd1, c2w2, intrinsics, intrinsics_inv, padding_mode='zeros'):
+    """
+    Inverse warp a source image to the target image plane.
+
+    Args:
+        img: the source image (where to sample pixels) -- [B, 3, H, W]
+        depth: depth map of the target image -- [B, H, W]
+        pose: 6DoF pose parameters from target to source -- [B, 6]
+        intrinsics: camera intrinsic matrix -- [B, 3, 3]
+        intrinsics_inv: inverse of the intrinsic matrix -- [B, 3, 3]
+    Returns:
+        Source image warped to the target image plane
+    """
+    B, H, W = depth.shape
+
+    R2 = c2w2[:, :, 0:3]
+    t2 = c2w2[:, :, 3, None]
+    R2_ = torch.transpose(R2, 2, 1)
+    t2_ = -torch.bmm(R2_, t2)
+
+    # 1. Lift directly into 3D world coordinates [B, 3, H*W]
+    w = ro1 + rd1 * depth.view(B, 1, -1)
+
+    # 3. Get camera coordinates in c2: c2 = R2'w + (-R2't2)
+    c2 = torch.bmm(R2_, w) + t2_
+
+    # 4. Get pixel coordinates in c2: p2 = Kc2 / c2[z]
+    z = torch.abs(c2[:, 2, None, :])
+    c2_ = c2 / z
+    c2_[:, 2, :] = 1
+    c2_[:, 1, :] *= -1
+    p2 = torch.bmm(intrinsics, c2_)
+
+    X = p2[:, 0]
+    Y = p2[:, 1]
+    X_norm = 2 * X / (W - 1) - 1  # Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1) [B, H*W]
+    Y_norm = 2 * Y / (H - 1) - 1  # Idem [B, H*W]
+
+    if padding_mode == 'zeros':
+        X_mask = ((X_norm > 1) + (X_norm < -1)).detach()
+        X_norm[X_mask] = 2  # make sure that no point in warped image is a combinaison of im and gray
+        Y_mask = ((Y_norm > 1) + (Y_norm < -1)).detach()
+        Y_norm[Y_mask] = 2
+
+    pixel_coords = torch.stack([X_norm, Y_norm], dim=2)  # [B, H*W, 2]
+    src_pixel_coords = pixel_coords.view(B, H, W, 2)
+    projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode=padding_mode,
+                                                    align_corners=True)
+
+    return projected_img

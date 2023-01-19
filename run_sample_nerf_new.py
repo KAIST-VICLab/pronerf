@@ -40,9 +40,12 @@ def batchify(fn, chunk):
     return ret
 
 
-def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64):
+def run_network(inputs, rgb0, pc, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64):
     """Prepares inputs and applies network 'fn'.
     """
+    # pc = pc.repeat(1, inputs.shape[1], 1)
+    # inputs_comb = torch.cat((inputs, pc), -1)
+    # inputs_flat = torch.reshape(inputs_comb, [-1, inputs_comb.shape[-1]])
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
 
@@ -52,17 +55,22 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
+    # if rgb0 is not None:
+    #     rgb0_ = rgb0.unsqueeze(1).repeat(1, inputs.shape[1], 1)
+    #     rgb0_ = torch.reshape(rgb0_, [-1, rgb0_.shape[-1]])
+    #     embedded = torch.cat((embedded, rgb0_), 1)
+
     outputs_flat = batchify(fn, netchunk)(embedded)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
 
 
-def batchify_rays(rays_flat, chunk=1024 * 32, **kwargs):
+def batchify_rays(rays_flat, iteration, chunk=1024 * 32, **kwargs):
     """Render rays in smaller minibatches to avoid OOM.
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
-        ret = render_rays(rays_flat[i:i + chunk], **kwargs)
+        ret = render_rays(rays_flat[i:i + chunk], iteration, **kwargs)
         for k in ret:
             if k not in all_ret:
                 all_ret[k] = []
@@ -72,7 +80,7 @@ def batchify_rays(rays_flat, chunk=1024 * 32, **kwargs):
     return all_ret
 
 
-def render(H, W, K, chunk=1024 * 32, rays=None, c2w=None, ndc=True,
+def render(H, W, K, iteration, chunk=1024 * 32, rays=None, c2w=None, ndc=True,
            near=0., far=1.,
            use_viewdirs=False, c2w_staticcam=None,
            **kwargs):
@@ -129,7 +137,7 @@ def render(H, W, K, chunk=1024 * 32, rays=None, c2w=None, ndc=True,
         rays = torch.cat([rays, viewdirs], -1)
 
     # Render and reshape
-    all_ret = batchify_rays(rays, chunk, **kwargs)
+    all_ret = batchify_rays(rays, iteration, chunk, **kwargs)
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
@@ -161,7 +169,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     for i, c2w in enumerate(tqdm(render_poses)):
         # print(i, time.time() - t)
         t = time.time()
-        rgb, disp, acc, min_ray, max_ray, dst, extras = render(H, W, K, chunk=chunk, c2w=c2w[:3, :4], **render_kwargs)
+        rgb, disp, acc, min_ray, max_ray, dst, extras = render(H, W, K, iteration=1e6, chunk=chunk, c2w=c2w[:3, :4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         mins.append(min_ray.cpu().numpy())
@@ -228,10 +236,9 @@ def create_nerf(args):
                           input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
         grad_vars.append({'params': model_fine.parameters(), 'weight_decay': 0, 'lr': args.lrate})
 
-    network_query_fn = lambda inputs, viewdirs, network_fn: run_network(inputs, viewdirs, network_fn,
-                                                                        embed_fn=embed_fn,
-                                                                        embeddirs_fn=embeddirs_fn,
-                                                                        netchunk=args.netchunk)
+    network_query_fn = lambda inputs, rgb0, pc, viewdirs, network_fn: \
+        run_network(inputs, rgb0, pc, viewdirs, network_fn,
+                    embed_fn=embed_fn, embeddirs_fn=embeddirs_fn, netchunk=args.netchunk)
 
     model_mmray = MinMaxRayS_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                  input_ch=input_ch*args.N_point_ray_enc if args.mm_emb else 3*args.N_point_ray_enc,
@@ -413,6 +420,7 @@ def compute_query_points_from_rays(
     max_rays = depth_values[:, -1, None]
     # dst = torch.mean(depth_values, dim=1, keepdim=True)
     dst = torch.relu(min_max_rays[:, num_samples*2, None])
+    # dst = torch.sigmoid(min_max_rays[:, num_samples*2, None]) * (far_thresh - near_thresh) + near_thresh
 
     mm_rgb = None
     if min_max_rays.shape[1] > num_samples*2+1:
@@ -439,6 +447,7 @@ def compute_query_points_from_rays(
 
 
 def render_rays(ray_batch,
+                iteration,
                 network_fn,
                 network_query_fn,
                 N_samples,
@@ -494,8 +503,15 @@ def render_rays(ray_batch,
     pts, z_vals, min_ray, max_ray, dst, mm_rgb, depth_densities = compute_query_points_from_rays(
         rays_o, rays_d, near, far, N_samples, min_max_ray_net, N_point_ray_enc, embed_fn, randomize)
 
+    # depth pts
+    pc = rays_o + rays_d * dst
+    pc = pc.unsqueeze(1)
+
     #     raw = run_network(pts)
-    raw = network_query_fn(pts, viewdirs, network_fn)
+    if iteration > 20000:
+        raw = network_query_fn(pts, mm_rgb, pc, viewdirs, network_fn)
+    else:
+        raw = network_query_fn(pts, 0*mm_rgb, 0*pc, viewdirs, network_fn)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd,
                                                                  depth_densities=depth_densities, pytest=pytest)
 
@@ -908,9 +924,8 @@ def train():
         #####  Core optimization loop  #####
         if i > 200000 and args.det_sampling:
             render_kwargs_train['randomize'] = False
-        rgb, disp, acc, min_ray, max_ray, dst, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
-                                        verbose=i < 10, retraw=True,
-                                        **render_kwargs_train)
+        rgb, disp, acc, min_ray, max_ray, dst, extras = render(H, W, K, iteration=i, chunk=args.chunk, rays=batch_rays,
+                                                               verbose=i < 10, retraw=True, **render_kwargs_train)
 
         disp_sm_loss = 0
         if args.disp_smoooth > 0:
@@ -933,7 +948,10 @@ def train():
             mm_disp_loss = args.a_mmdisp * img2mse(extras['depth_map'].detach(), dst.squeeze())
 
         trans = extras['raw'][..., -1]
+        # if i > 1000:
         loss = img_loss + mm_rgb_loss + mm_disp_loss + disp_sm_loss
+        # else:
+        # loss = mm_rgb_loss + mm_disp_loss + disp_sm_loss
         psnr = mse2psnr(img_loss)
 
         if 'rgb0' in extras:

@@ -161,10 +161,11 @@ class SineLayer(nn.Module):
     def __init__(self, in_features, out_features, bias=True,
                  is_first=False, omega_0=30.0):
         super().__init__()
-        self.omega_weight_0 = torch.nn.Parameter(torch.randn(1) * 0 + omega_0)
+        self.omega_0 = omega_0
+        self.omega_weight_0 = torch.nn.Parameter(torch.randn(1, out_features) * 0 + omega_0)
         self.omega_weight_0.requires_grad = True
 
-        self.phase_weight_0 = torch.nn.Parameter(torch.randn(1) * 0)
+        self.phase_weight_0 = torch.nn.Parameter(torch.randn(1, out_features) * 0)
         self.phase_weight_0.requires_grad = True
 
         self.is_first = is_first
@@ -179,8 +180,8 @@ class SineLayer(nn.Module):
             if self.is_first:
                 self.linear.weight.uniform_(-1 / self.in_features, 1 / self.in_features)
             else:
-                self.linear.weight.uniform_(-np.sqrt(6 / self.in_features) / int(self.omega_weight_0),
-                                            np.sqrt(6 / self.in_features) / int(self.omega_weight_0))
+                self.linear.weight.uniform_(-np.sqrt(6 / self.in_features) / int(self.omega_0),
+                                            np.sqrt(6 / self.in_features) / int(self.omega_0))
 
     def forward(self, input):
         # print(self.omega_weight_0.detach())

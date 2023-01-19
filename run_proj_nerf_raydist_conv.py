@@ -533,14 +533,15 @@ def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, H, W, K,
     ref_rgbs = ref_rgbs.view(ref_rgbs.shape[0], H, W, 3)
     ref_rgbs = torch.permute(ref_rgbs, (0, 3, 1, 2))
     depth_ = depth.view(1, H, W).repeat(ref_rgbs.shape[0], 1, 1)
+    ro1, rd1 = torch.transpose(rays_o, 0, 1).unsqueeze(0), torch.transpose(rays_d, 0, 1).unsqueeze(0) # 1, 3, H*W
     K = K.unsqueeze(0).repeat(ref_rgbs.shape[0], 1, 1)
     inv_K = torch.inverse(K)
     target_pose = target_pose.unsqueeze(0).repeat(ref_rgbs.shape[0], 1, 1)
 
-    warps = inverse_warp.inverse_warp_rt1_rt2(ref_rgbs, depth_, target_pose, ref_poses, K, inv_K, padding_mode='zeros')
+    warps = inverse_warp.inverse_warp_rod1_rt2(ref_rgbs, depth_, ro1, rd1, ref_poses, K, inv_K, padding_mode='zeros')
     warps = torch.permute(warps, (0, 2, 3, 1)).view(ref_rgbs.shape[0], -1, 3)
 
-    mean_warp = F.softmax(torch.mean(torch.abs(mm_rgb0.unsqueeze(0) - warps), dim=2, keepdim=True), dim=0)
+    mean_warp = F.softmax(2*torch.mean(torch.abs(mm_rgb0.unsqueeze(0) - warps), dim=2, keepdim=True), dim=0)
     valid_warp = mean_warp * (warps.sum(2, True) != 0).type_as(warps)
     mean_warp = torch.sum(valid_warp * warps, 0) / (torch.sum(valid_warp.detach(), 0) + 1e-6)
 
@@ -793,13 +794,6 @@ def train():
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb1, target_s)
-
-        # warp_loss = 0
-        # for num_ref in range(ref_rgbs.shape[0]):
-        #     this_warped_view = extras[f'warp_{num_ref}']
-        #     valid_warp = (this_warped_view.detach() != 0).type_as(this_warped_view)
-        #     warp_loss += torch.mean(valid_warp * (this_warped_view - target_s) ** 2)
-        # warp_loss = warp_loss / ref_rgbs.shape[0]
 
         warp_errors = []
         valid_masks = []
