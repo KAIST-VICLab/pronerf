@@ -174,6 +174,7 @@ class SineLayer(nn.Module):
         self.linear = nn.Linear(in_features, out_features, bias=bias)
 
         self.init_weights()
+        self.print = False
 
     def init_weights(self):
         with torch.no_grad():
@@ -184,7 +185,56 @@ class SineLayer(nn.Module):
                                             np.sqrt(6 / self.in_features) / int(self.omega_0))
 
     def forward(self, input):
-        # print(self.omega_weight_0.detach())
+        if not self.print:
+            print(self.omega_weight_0.detach())
+            print(self.phase_weight_0.detach())
+            self.print = True
+        return torch.sin(self.omega_weight_0 * self.linear(input) + self.phase_weight_0)
+
+    def forward_with_intermediate(self, input):
+        # For visualization of activation distributions
+        intermediate = self.omega_weight_0 * self.linear(input) + self.phase_weight_0
+        return torch.sin(intermediate), intermediate
+
+
+class SineLayerC(nn.Module):
+    # See paper sec. 3.2, final paragraph, and supplement Sec. 1.5 for discussion of omega_0.
+
+    # If is_first=True, omega_0 is a frequency factor which simply multiplies the activations before the
+    # nonlinearity. Different signals may require different omega_0 in the first layer - this is a
+    # hyperparameter.
+
+    # If is_first=False, then the weights will be divided by omega_0 so as to keep the magnitude of
+    # activations constant, but boost gradients to the weight matrix (see supplement Sec. 1.5)
+
+    def __init__(self, in_features, out_features, kernel_size=1, padding=0, bias=True,
+                 is_first=False, omega_0=1.0):
+        super().__init__()
+        self.omega_0 = omega_0
+        self.omega_weight_0 = torch.nn.Parameter(torch.randn(1, out_features, 1, 1) * 0 + omega_0)
+        self.omega_weight_0.requires_grad = True
+
+        self.phase_weight_0 = torch.nn.Parameter(torch.randn(1, out_features, 1, 1) * 0)
+        self.phase_weight_0.requires_grad = True
+
+        self.is_first = is_first
+
+        self.in_features = in_features
+        self.linear = nn.Conv2d(in_features, out_features,
+                                kernel_size=kernel_size, padding=padding, stride=1, bias=bias)
+
+        self.init_weights()
+        self.print = False
+
+    def init_weights(self):
+        with torch.no_grad():
+            if self.is_first:
+                self.linear.weight.uniform_(-1 / self.in_features, 1 / self.in_features)
+            else:
+                self.linear.weight.uniform_(-np.sqrt(6 / self.in_features) / int(self.omega_0),
+                                            np.sqrt(6 / self.in_features) / int(self.omega_0))
+
+    def forward(self, input):
         return torch.sin(self.omega_weight_0 * self.linear(input) + self.phase_weight_0)
 
     def forward_with_intermediate(self, input):
@@ -232,7 +282,7 @@ class MinMaxRayS_Net(nn.Module):
         self.input_ch = input_ch
         self.skips = skips
 
-        self.fc_backbone = nn.ModuleList([SineLayer(input_ch, W, omega_0=1.0, is_first=True)] +
+        self.fc_backbone = nn.ModuleList([SineLayer(input_ch, W, omega_0=2.0, is_first=True)] +
                                          [SineLayer(W, W, omega_0=1.0) if i not in self.skips else
                                           SineLayer(W + input_ch, W, omega_0=1.0) for i in range(D - 1)])
 
@@ -312,6 +362,35 @@ class MinMaxRayS1_Net(nn.Module):
             h = self.fc_backbone[i](h)
             if i in self.skips:
                 h = torch.cat([x, h], -1)
+        outputs = self.fc_output(h)
+
+        return outputs
+
+
+class MinMaxRayS1Conv_Net(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, output_ch=3, skips=[4]):
+        """
+        """
+        super(MinMaxRayS1Conv_Net, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.skips = skips
+
+        self.fc_backbone = nn.ModuleList([SineLayerC(input_ch, W, kernel_size=1, padding=0)] +
+                                         [SineLayerC(W, W, kernel_size=1) if i not in self.skips else
+                                          SineLayerC(W + input_ch, W, kernel_size=1) for i in range(D - 1)])
+
+        self.fc_output = nn.Conv2d(W, output_ch,kernel_size=1)
+
+    def forward(self, x):
+        h = x
+        for i, l in enumerate(self.fc_backbone):
+            h = self.fc_backbone[i](h)
+            h = F.elu(h)
+            if i in self.skips:
+                h = torch.cat([x, h], 1)
+
         outputs = self.fc_output(h)
 
         return outputs

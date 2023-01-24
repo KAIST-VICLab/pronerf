@@ -432,8 +432,8 @@ def compute_query_points_from_rays(
 
     mm_rgb = None
     if min_max_rays.shape[1] > num_samples*2+1:
-        # mm_rgb = torch.sigmoid(min_max_rays[:, num_samples*2+1::])
-        mm_rgb = min_max_rays[:, num_samples*2+1::]
+        mm_rgb = torch.sigmoid(min_max_rays[:, num_samples*2+1::])
+        # mm_rgb = min_max_rays[:, num_samples*2+1::]
 
     if randomize is True:
         # ray_origins: (N_rays, 3)
@@ -446,8 +446,7 @@ def compute_query_points_from_rays(
         depth_values[depth_values < 0] = 0
     sort_out = torch.sort(depth_values, dim=-1)
     depth_values = sort_out[0]
-    # depth_densities = depth_densities[sort_out[1]]
-    depth_densities = depth_densities.view(-1)[sort_out[1].view(-1)].view(depth_densities.shape)
+    depth_densities = depth_densities.gather(dim=1, index=sort_out[1])
 
     # [N_rays, N_samples, 3] = (N_rays 1, 3) + (N_rays, 1, 3) * (1, N_samples, 1)
     # query_points: [N_rays, N_samples, 3]
@@ -518,7 +517,7 @@ def render_rays(ray_batch,
 
     #     raw = run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)
-    if iteration > 10000:
+    if iteration > 20000:
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd,
                                                                      dst, mm_rgb, depth_densities=depth_densities, pytest=pytest)
     else:
@@ -954,7 +953,6 @@ def train():
 
         mm_disp_loss = 0
         if args.a_mmdisp > 0 and i > 1000:
-            # print(extras['depth_map'].shape)
             mm_disp_loss = args.a_mmdisp * img2mse(extras['depth_map'].detach(), dst.squeeze())
 
         trans = extras['raw'][..., -1]

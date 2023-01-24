@@ -1,6 +1,6 @@
 import os, sys
 
-gpu_n = '0'
+gpu_n = '1'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 
@@ -356,13 +356,13 @@ def create_nerf(args):
     # Input is coords, ray points. Output is disp, rgb0
     model_mmray = MinMaxRayS1_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                   input_ch=2+input_ch*args.N_point_ray_enc if args.mm_emb else 2+3*args.N_point_ray_enc,
-                                  output_ch=3+1, skips=args.mmnetskips)
+                                  output_ch=args.N_samples * (1 + 1 + 3), skips=args.mmnetskips)
     grad_vars.append({'params': model_mmray.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     # Input is rgb0, mean warp, coords, ray points. Output is rgb1
     model_refine = MinMaxRayS1_Net(D=args.mmnetdepth, W=args.mmnetwidth,
-                                  input_ch=8+input_ch*args.N_point_ray_enc if args.mm_emb else 8+3*args.N_point_ray_enc,
-                                  output_ch=3, skips=args.mmnetskips)
+                                  input_ch=6+input_ch*args.N_samples if args.mm_emb else 6+3*args.N_samples,
+                                  output_ch=args.N_samples * (1 + 3), skips=args.mmnetskips)
     grad_vars.append({'params': model_refine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     # Create optimizer
@@ -413,7 +413,7 @@ def create_nerf(args):
         'refine_net': model_refine,
         'N_point_ray_enc': args.N_point_ray_enc,
         'embed_fn': embed_fn if args.mm_emb else None,
-        'randomize':True
+        'randomize':False
     }
 
     # NDC only good for LLFF-style forward facing data
@@ -430,16 +430,17 @@ def create_nerf(args):
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
 
 
-def compute_disp_and_mmrgb(
+def compute_query_points_from_rays(
         ray_origins: torch.Tensor,
         ray_directions: torch.Tensor,
-        coords,
+        coords: torch.Tensor,
         near_thresh: float,
         far_thresh: float,
+        num_samples: int,
         mm_model,
         N_point_ray_enc,
         embed_fn,
-        randomize = False
+        randomize = True
 ) -> (torch.Tensor, torch.Tensor):
     # if randomize:
     #     if random.random() > 0.5:
@@ -450,27 +451,110 @@ def compute_disp_and_mmrgb(
     #         random_far = random.uniform((near_thresh + far_thresh) / 2, far_thresh)
     #     mm_input = torch.linspace(random_near, random_far, N_point_ray_enc).to(ray_origins)
     # else:
-
     mm_input = torch.linspace(near_thresh, far_thresh, N_point_ray_enc).to(ray_origins)
     mm_input = mm_input.unsqueeze(0)
-    if randomize:
-        noise_shape = [ray_origins.shape[0], N_point_ray_enc]
-        mm_input = mm_input + torch.rand(noise_shape).to(ray_origins) * (far_thresh - near_thresh) / N_point_ray_enc
-
-    # N_rays, N_point_ray_enc, 3
-    mm_input = ray_origins[..., None, :] + ray_directions[..., None, :] * mm_input[..., :, None]
+    mm_input = ray_origins[..., None, :] + ray_directions[..., None, :] * mm_input[..., :, None]  # N_rays, N_point_ray_enc, 3
     mm_input = mm_input.view(ray_origins.shape[0], N_point_ray_enc * 3)
     mm_input = torch.cat((mm_input, coords), 1)
-    if embed_fn is not None:
-        disp_mmrgb = mm_model(embed_fn(mm_input))
+    if embed_fn is None:
+        min_max_rays = mm_model(mm_input)
     else:
-        disp_mmrgb = mm_model(mm_input)
+        min_max_rays = mm_model(embed_fn(mm_input))
 
-    # depth = torch.sigmoid(disp_mmrgb[0][:, 0, None]) * (far_thresh - near_thresh) + near_thresh
-    depth = torch.relu(disp_mmrgb[:, 0, None]) + 1e-6
-    mm_rgb = disp_mmrgb[:, 1::]
+    # Depth levels
+    depth_values = torch.sigmoid(min_max_rays[:, 0:num_samples]) * (far_thresh - near_thresh) + near_thresh
+    dst = torch.mean(depth_values, dim=1, keepdim=True)
 
-    return mm_rgb, depth, mm_input
+    # Opacities
+    # depth_densities = torch.relu(min_max_rays[:, num_samples:num_samples*2])
+    depth_densities = min_max_rays[:, num_samples:num_samples*2]
+
+    # RGB priors
+    # depth_rgbs = torch.sigmoid(min_max_rays[:, num_samples*2::]).view(ray_origins.shape[0], num_samples, 3)
+    depth_rgbs = min_max_rays[:, num_samples*2::].view(ray_origins.shape[0], num_samples, 3)
+
+    if randomize is True:
+        # ray_origins: (N_rays, 3)
+        # noise_shape = (N_rays, num_samples)
+        noise_shape = list(ray_origins.shape[:-1]) + [num_samples]
+        # depth_values: (num_samples)
+        noise_ = (1/6) * torch.normal(0.0, 1.0, size=noise_shape).to(ray_origins)
+        sort_out = torch.sort(depth_values, dim=-1)
+        min_rays = sort_out[0][:, 0, None]
+        max_rays = sort_out[0][:, -1, None]
+        noise_ = noise_ * (max_rays.detach() - min_rays.detach()) / num_samples
+        depth_values = noise_ + depth_values
+        depth_values[depth_values < 0] = 0
+    sort_out = torch.sort(depth_values, dim=-1)
+    depth_values = sort_out[0]
+    depth_densities = depth_densities.gather(dim=1, index=sort_out[1])
+    sort_indices = sort_out[1].unsqueeze(2).repeat(1, 1, depth_rgbs.shape[2])
+    depth_rgbs = depth_rgbs.gather(dim=1, index=sort_indices)
+    min_rays = depth_values[:, 0, None]
+    max_rays = depth_values[:, -1, None]
+
+    # [N_rays, N_samples, 3] = (N_rays 1, 3) + (N_rays, 1, 3) * (1, N_samples, 1)
+    # query_points: [N_rays, N_samples, 3]
+    query_points = ray_origins[..., None, :] + ray_directions[..., None, :] * depth_values[..., :, None]
+    return query_points, depth_values, min_rays, max_rays, dst, depth_rgbs, depth_densities, mm_input
+
+
+def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, rgb0=None,
+                depth_densities=None, use_res_dense=True, pytest=False):
+    """Transforms model's predictions to semantically meaningful values.
+    Args:
+        raw: [num_rays, num_samples along ray, 4]. Prediction from model.
+        z_vals: [num_rays, num_samples along ray]. Integration time.
+        rays_d: [num_rays, 3]. Direction of each ray.
+    Returns:
+        rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
+        disp_map: [num_rays]. Disparity map. Inverse of depth map.
+        acc_map: [num_rays]. Sum of weights along each ray.
+        weights: [num_rays, num_samples]. Weights assigned to each sampled color.
+        depth_map: [num_rays]. Estimated distance to object.
+    """
+    raw2alpha = lambda raw, dists, act_fn=F.relu: 1. - torch.exp(-act_fn(raw) * dists)
+
+    dists = z_vals[..., 1:] - z_vals[..., :-1]
+    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[..., :1].shape)], -1)  # [N_rays, N_samples]
+
+    dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
+
+    if rgb0 is None:
+        rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
+    else:
+        rgb = torch.sigmoid(rgb0) + raw[..., :3]  # [N_rays, N_samples, 3]
+
+    noise = 0.
+    if raw_noise_std > 0.:
+        noise = torch.randn(raw[..., 3].shape) * raw_noise_std
+
+        # Overwrite randomly sampled data if pytest
+        if pytest:
+            np.random.seed(0)
+            noise = np.random.rand(*list(raw[..., 3].shape)) * raw_noise_std
+            noise = torch.Tensor(noise)
+
+    if depth_densities is not None:
+        if use_res_dense:
+            # alpha = 1. - torch.exp(-(F.relu(raw[..., 3] + noise) + depth_densities) * dists)
+            alpha = raw2alpha(raw[..., 3] + depth_densities + noise, dists)  # [N_rays, N_samples]
+        else:
+            alpha = raw2alpha(depth_densities + noise, dists)  # [N_rays, N_samples]
+    else:
+        alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
+    # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
+    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1. - alpha + 1e-10], -1), -1)[:, :-1]
+    rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3]
+
+    depth_map = torch.sum(weights * z_vals, -1)
+    disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map), depth_map / (torch.sum(weights, -1) + 1e-6))
+    acc_map = torch.sum(weights, -1)
+
+    if white_bkgd:
+        rgb_map = rgb_map + (1. - acc_map[..., None])
+
+    return rgb_map, disp_map, acc_map, weights, depth_map
 
 
 def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, H, W, K,
@@ -527,27 +611,46 @@ def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, H, W, K,
     bounds = torch.reshape(ray_batch[..., 6:8], [-1, 1, 2])
     near, far = bounds[0, 0, 0], bounds[0, 0, 1]  # [-1,1]
 
-    mm_rgb0, depth, mm_input = compute_disp_and_mmrgb(
-        rays_o, rays_d, coords, near, far, min_max_ray_net, N_point_ray_enc, embed_fn, randomize)
+    pts, z_vals, min_ray, max_ray, dst, depth_rgbs, depth_densities, mm_input = compute_query_points_from_rays(
+        rays_o, rays_d, coords, near, far, N_samples, min_max_ray_net, N_point_ray_enc, embed_fn, randomize)
+
+    # Mean RGB color
+    # mean_rgb = torch.mean(depth_rgbs, dim=1)
+    # print(f'mean_rgb shape {mean_rgb.shape}')
+
+    raw0 = torch.cat((depth_rgbs, depth_densities.unsqueeze(2)), -1)
+    rgb_map, disp_map, acc_map, weights, depth_map =\
+        raw2outputs(raw0, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
     ref_rgbs = ref_rgbs.view(ref_rgbs.shape[0], H, W, 3)
     ref_rgbs = torch.permute(ref_rgbs, (0, 3, 1, 2))
-    depth_ = depth.view(1, H, W).repeat(ref_rgbs.shape[0], 1, 1)
-    ro1, rd1 = torch.transpose(rays_o, 0, 1).unsqueeze(0), torch.transpose(rays_d, 0, 1).unsqueeze(0) # 1, 3, H*W
+    depth_ = depth_map.view(1, H, W).repeat(ref_rgbs.shape[0], 1, 1)
+    ro1, rd1 = torch.transpose(rays_o, 0, 1).unsqueeze(0), torch.transpose(rays_d, 0, 1).unsqueeze(0)  # 1, 3, H*W
     K = K.unsqueeze(0).repeat(ref_rgbs.shape[0], 1, 1)
     inv_K = torch.inverse(K)
     target_pose = target_pose.unsqueeze(0).repeat(ref_rgbs.shape[0], 1, 1)
 
     warps = inverse_warp.inverse_warp_rod1_rt2(ref_rgbs, depth_, ro1, rd1, ref_poses, K, inv_K, padding_mode='zeros')
     warps = torch.permute(warps, (0, 2, 3, 1))
-    valid_warp = (warps.sum(3, True) != 0).type_as(warps)
-    mean_warp = torch.sum(warps, 0) / (torch.sum(valid_warp.detach(), 0) + 1e-6)
-    mean_warp = mean_warp.view(-1, 3)
+    # valid_warp = (warps.sum(3, True) != 0).type_as(warps)
+    # mean_warp = torch.sum(warps, 0) / (torch.sum(valid_warp.detach(), 0) + 1e-6)
+    # mean_warp = mean_warp.view(-1, 3)
+    # print(f'depth map shape {depth_map.shape}')
+    mean_warp = torch.abs(rgb_map.unsqueeze(0) - warps.view(-1, H * W, 3))
+    sort_out = torch.sort(mean_warp, 0)
+    mean_warp = warps.view(-1, H * W, 3).gather(dim=0, index=sort_out[1].detach()) # d1
+    mean_warp = mean_warp[0]
 
-    mm_input = torch.cat((mm_input, mm_rgb0, mean_warp), 1)
-    mm_rgb1 = refine_net(mm_input)
+    # mm_input = torch.cat((mm_input, rgb_map, depth_map.view(-1, 1), mean_warp), 1)
+    # raw1 = refine_net(pts.view(-1, N_samples * 3)) # b
+    # raw1 = refine_net(torch.cat((pts.view(-1, N_samples * 3), rgb_map), 1)) # c
+    raw1 = refine_net(torch.cat((pts.view(-1, N_samples * 3), rgb_map, mean_warp), 1)) # d
+    # raw1 = raw1.view(-1, N_samples, 4) + torch.cat((depth_rgbs, depth_densities.unsqueeze(2)), -1)
+    raw1 = torch.cat((depth_rgbs + raw1.view(-1, N_samples, 4)[..., :3], depth_densities.unsqueeze(2)), -1) # d2
+    rgb_map1, _, _, _, _ =\
+        raw2outputs(raw1, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
-    ret = {'rgb_map0': mm_rgb0, 'rgb_map1': mm_rgb1, 'depth_map':depth, 'mean_warp':mean_warp}
+    ret = {'rgb_map0': rgb_map, 'rgb_map1': rgb_map1, 'depth_map':depth_map, 'mean_warp':mean_warp}
 
     for i in range(warps.shape[0]):
         ret[f'warp_{i}'] = warps[i].view(-1, 3)
@@ -817,6 +920,10 @@ def train():
 
         loss = img_loss + perc_loss + warp_loss + img2mse(rgb0, target_s)
         psnr = mse2psnr(img_loss)
+
+        if 'mean_rbg0' in extras and args.a_mmrgb > 0:
+            img_loss0 = img2mse(extras['mean_rbg0'], target_s)
+            loss = loss + img_loss0
 
         loss.backward()
         optimizer.step()

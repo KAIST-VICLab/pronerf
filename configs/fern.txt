@@ -1,26 +1,28 @@
-expname = fern_4_sample_reg7_dd1_mmdisp_check
+expname = fern_epinerf_ap_m1_1k_exp
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
+no_ndc = True
 
 factor = 4
 llffhold = 8
+k_ref = 1
 
 N_rand = 1024
-N_samples = 4
+N_samples = 16
 N_importance = 0
 
 use_viewdirs = True
 raw_noise_std = 1e0
 
-lrate = 5e-4
-a_mmrgb = 0.1
-a_mmdisp = 0.01
+lrate = 1e-3
+a_p = 0.001
+a_mmrgb = 0.0
 mmnetdepth = 8
-mmnetwidth = 256
+mmnetwidth = 128
 mmnetskips = [10000]
 N_point_ray_enc = 32
 mm_emb = False
-weight_decay = 1e-7
-disp_smoooth = 0.0
-double_test_sample = False
-det_sampling = False
+precrop_iters = 0
+precrop_frac = 0.5
+weight_decay = 0e-7
+rand_crop_size = 200

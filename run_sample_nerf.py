@@ -429,8 +429,7 @@ def compute_query_points_from_rays(
         depth_values[depth_values < 0] = 0
     sort_out = torch.sort(depth_values, dim=-1)
     depth_values = sort_out[0]
-    # depth_densities = depth_densities[sort_out[1]]
-    depth_densities = depth_densities.view(-1)[sort_out[1].view(-1)].view(depth_densities.shape)
+    depth_densities = depth_densities.gather(dim=1, index=sort_out[1])
 
     # [N_rays, N_samples, 3] = (N_rays 1, 3) + (N_rays, 1, 3) * (1, N_samples, 1)
     # query_points: [N_rays, N_samples, 3]
