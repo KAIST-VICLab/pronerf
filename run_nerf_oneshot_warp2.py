@@ -736,7 +736,9 @@ def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, H, W, K, k_
     # ! warp for reprojection loss
     ro1, rd1 = torch.transpose(rays_o, 0, 1).unsqueeze(0), torch.transpose(rays_d, 0, 1).unsqueeze(0)  # 1, 3, H*W
 
-    warps = inverse_warp.inverse_warp_rod1_rt2_v2(ref_rgbs, depth_map.view(1,H,W), ro1, rd1, ref_poses, K, None, padding_mode='zeros')
+    warps = inverse_warp.inverse_warp_rod1_rt2_v2(ref_rgbs, depth_map.view(1,H,W), ro1, rd1, ref_poses, K, None, padding_mode='border')
+    invalid_warp = (torch.sum(warps.detach(), 1, True) == 0).type_as(warps)
+    warps = warps * (1 - invalid_warp) - invalid_warp # make invalid regions -1
 
     rgb0 = (mm_rgb.view(3, H*W).permute(1, 0))
 
@@ -1008,10 +1010,12 @@ def train():
         # sort_outs = torch.sort(warp_errors, dim=0) # sort errors and use half
         # warp_errors = sort_outs[0]
         # valid_masks = valid_masks.view(-1)[sort_outs[1].detach().view(-1)].view(valid_masks.shape)
-        # warp_loss = torch.sum(valid_masks[0:ref_rgbs.shape[0]//2] * warp_errors[0:ref_rgbs.shape[0]//2]) / \
-        #             (torch.sum(valid_masks[0:ref_rgbs.shape[0]//2]) + 1e-6)
+        # warp_loss = torch.sum(valid_masks[0:ref_rgbs.shape[0]//4] * warp_errors[0:ref_rgbs.shape[0]//4]) / \
+        #             (torch.sum(valid_masks[0:ref_rgbs.shape[0]//4]) + 1e-6)
+
 
         perc_loss = 0
+        perc0_loss = 0
         if args.a_p > 0 and i >= a_sch:
             # reshape for vgg (B, C, H, W)
             rgb_predicted_ = (rgb1.view(th, tw, 3).clone().permute(2, 0, 1)).unsqueeze(0)
@@ -1060,7 +1064,7 @@ def train():
             # filename = os.path.join(basedir, expname, 'debug', 'check_depth.png')
             # imageio.imwrite(filename, rgb8)
 
-            for num_ref in range(args.N_point_ray_enc * args.k_ref):
+            for num_ref in range(ref_rgbs.shape[0]):
                 rgb8 = to8b(extras[f'warp_{num_ref}'].view(th, tw, 3).detach().cpu().numpy())
                 filename = os.path.join(basedir, expname, 'debug', f'check_warp_{num_ref}.png')
                 imageio.imwrite(filename, rgb8)
