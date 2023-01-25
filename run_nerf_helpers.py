@@ -515,6 +515,14 @@ def get_rays(H, W, K, c2w):
     rays_o = c2w[:3,-1].expand(rays_d.shape)
     return rays_o, rays_d
 
+def get_centered_rays(H, W, K, c2w):
+    dirs = torch.Tensor([0, 0, -1], device = c2w.device)[None]
+    # Rotate ray directions from camera frame to the world frame
+    rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:,:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    rays_o = c2w[:,:3,-1].expand(rays_d.shape)
+    return rays_o, rays_d
+
 
 def get_rays_np(H, W, K, c2w):
     i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')

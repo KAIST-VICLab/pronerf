@@ -1,4 +1,4 @@
-expname = fern_epinerf_ap_m1_1k_exp
+expname = fern_epinerf_ap_m1_1k_exp_reprojection
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
 no_ndc = True
@@ -8,7 +8,7 @@ llffhold = 8
 k_ref = 1
 
 N_rand = 1024
-N_samples = 16
+N_samples = 4
 N_importance = 0
 
 use_viewdirs = True
