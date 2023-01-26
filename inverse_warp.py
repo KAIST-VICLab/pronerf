@@ -1,9 +1,34 @@
 from __future__ import division
 import torch
 from torch.autograd import Variable
+import torch.nn.functional as F
 
 pixel_coords = None
 
+def bwd_warp(H, W, K, world_points, src_imgs, src_poses, patch_H, patch_W):
+    homo_world_points = torch.cat(
+        [world_points, torch.ones(patch_H * patch_W, 1).to(world_points.device)], 1)[..., None]  # H*W, 4,1
+    src_imgs = src_imgs.permute(0, 3, 1, 2)  # B,3,H,W
+    homo_T = torch.cat([src_poses, torch.zeros(
+        src_imgs.shape[0], 1, 4)], dim=1)  # B,4,4
+    homo_T[:, -1, -1] = 1
+    inv_T = torch.inverse(homo_T)
+    rect_points = torch.matmul(inv_T[:, None, :3, :], homo_world_points)
+    # Rotate to cam coord
+    rect_points[:, :, 1:] *= -1
+
+    cam_points = torch.matmul(torch.from_numpy(K).to(
+        rect_points.device)[None, None].float(), rect_points)
+    cam_points[:, :, :2, :] /= (cam_points[:, :, 2:, :] + 1e-7)
+    pix_coords = cam_points[:, :, :2,
+                            :].view(-1, patch_H, patch_W, 2)  # B,H,W,2
+    pix_coords[..., 0] /= W - 1
+    pix_coords[..., 1] /= H - 1
+    pix_coords = (pix_coords - 0.5) * 2
+
+    warped_imgs = F.grid_sample(src_imgs.to(
+        pix_coords.device), pix_coords, align_corners=False, padding_mode="border")
+    return warped_imgs
 
 def set_id_grid(depth):
     global pixel_coords
