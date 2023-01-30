@@ -1,4 +1,4 @@
-expname = fern_epinerf_ap_m1_1k_exp_pretrained_fine_nofuse_norand
+expname = fern_baseline_400
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
 
@@ -7,7 +7,7 @@ llffhold = 8
 k_ref = 16
 
 N_rand = 1024
-N_samples = 4
+N_samples = 400
 N_importance = 0
 
 use_viewdirs = True
@@ -25,4 +25,4 @@ mm_emb = False
 precrop_iters = 0
 precrop_frac = 0.5
 weight_decay = 1e-7
-rand_crop_size = 256
+rand_crop_size = 64

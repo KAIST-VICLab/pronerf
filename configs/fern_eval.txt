@@ -1,5 +1,6 @@
-expname = fern_epinerf_ap_m1_1k_exp_pretrained_fine_nofuse_norand
+expname = fern_epinerf_eval
 datadir = ./data/nerf_llff_data/fern
+ft_path = logs_minmax/fern_epinerf_ap_m1_1k_exp_refine/220000.tar
 dataset_type = llff
 
 factor = 4
@@ -15,8 +16,7 @@ raw_noise_std = 1e0
 
 lrate = 5e-4
 a_p = 0.001
-a_mmrgb = 1.0
-a_mmdisp = 1.0
+a_mmrgb = 0.0
 mmnetdepth = 8
 mmnetwidth = 128
 mmnetskips = [10000]
@@ -25,4 +25,4 @@ mm_emb = False
 precrop_iters = 0
 precrop_frac = 0.5
 weight_decay = 1e-7
-rand_crop_size = 256
+rand_crop_size = 200

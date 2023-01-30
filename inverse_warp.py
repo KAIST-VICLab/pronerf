@@ -378,7 +378,8 @@ def inverse_warp_rod1_rt2(img, depth, ro1, rd1, c2w2, intrinsics, intrinsics_inv
 
     return projected_img
 
-def inverse_warp_rod1_rt2_v2(img, depth, ro1, rd1, c2w2, intrinsics, intrinsics_inv, padding_mode='zeros'):
+
+def inverse_warp_rod1_rt2_v2(img, depth, points, c2w2, intrinsics, padding_mode='zeros'):
     """
     Inverse warp a source image to the target image plane.
 
@@ -392,25 +393,21 @@ def inverse_warp_rod1_rt2_v2(img, depth, ro1, rd1, c2w2, intrinsics, intrinsics_
         Source image warped to the target image plane
     """
     B, H, W = depth.shape
-    
+
     R2 = c2w2[:, :, 0:3]
     t2 = c2w2[:, :, 3, None]
     R2_ = torch.transpose(R2, 2, 1)
     t2_ = -torch.bmm(R2_, t2)
 
-    # 1. Lift directly into 3D world coordinates [B, 3, H*W]
-    w = ro1 + rd1 * depth.view(B, 1, -1)
-
     # 3. Get camera coordinates in c2: c2 = R2'w + (-R2't2)
-    c2 = torch.matmul(R2_, w) + t2_
+    c2 = torch.bmm(R2_, points) + t2_
 
     # 4. Get pixel coordinates in c2: p2 = Kc2 / c2[z]
     z = torch.abs(c2[:, 2, None, :])
     c2_ = c2 / z
     c2_[:, 2, :] = 1
     c2_[:, 1, :] *= -1
-    p2 = torch.matmul(intrinsics[None], c2_)
-    
+    p2 = torch.bmm(intrinsics, c2_)
 
     X = p2[:, 0]
     Y = p2[:, 1]
@@ -424,8 +421,8 @@ def inverse_warp_rod1_rt2_v2(img, depth, ro1, rd1, c2w2, intrinsics, intrinsics_
         Y_norm[Y_mask] = 2
 
     pixel_coords = torch.stack([X_norm, Y_norm], dim=2)  # [B, H*W, 2]
-    src_pixel_coords = pixel_coords.view(-1, H, W, 2)
-    src_img = img.permute(0,2,1).view(-1,3,H,W)
-    projected_img = torch.nn.functional.grid_sample(src_img, src_pixel_coords, padding_mode=padding_mode,align_corners=True)
+    src_pixel_coords = pixel_coords.view(B, H, W, 2)
+    projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode=padding_mode,
+                                                    align_corners=True)
 
     return projected_img

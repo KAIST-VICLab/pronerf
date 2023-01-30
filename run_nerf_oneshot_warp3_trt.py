@@ -1,6 +1,6 @@
 import os, sys
 
-gpu_n = '6'
+gpu_n = '4'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 
@@ -18,11 +18,12 @@ from loss_functions import perceptual_loss, vgg
 import inverse_warp
 from inverse_warp import bwd_warp
 from math import log
-import kornia
+import cv2
 
 import matplotlib.pyplot as plt
 
 from run_nerf_helpers import *
+from trt_infer import NeRFEngine, MMEngine, RefineEngine
 
 from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
@@ -45,6 +46,8 @@ def config_parser():
                         help='where to store ckpts and logs')
     parser.add_argument("--datadir", type=str, default='./data/llff/fern',
                         help='input data directory')
+    parser.add_argument("--use_trt", action='store_true',
+                    help='use trt inference')
 
     # training options
     parser.add_argument("--netdepth", type=int, default=8,
@@ -178,8 +181,9 @@ def batchify(fn, chunk):
     if chunk is None:
         return fn
 
-    def ret(inputs):
-        return torch.cat([fn(inputs[i:i + chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+    def ret(inputs, inputs_dir):
+        results =  torch.cat([fn(inputs[i:i + chunk], inputs_dir[i:i + chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+        return results
 
     return ret
 
@@ -194,18 +198,13 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64
         input_dirs = viewdirs[:, None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
-        embedded = torch.cat([embedded, embedded_dirs], -1)
 
-    outputs_flat = batchify(fn, netchunk)(embedded)
+    outputs_flat = batchify(fn, netchunk)(embedded, embedded_dirs)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
 
 
-def render(H, h, W, w, K, ref_K, k_ref, coords=None, chunk=1024 * 32, rays=None, c2w=None, ndc=True,
-           target_pose=None, ref_poses=None, ref_rgbs=None,
-           near=0., far=1.,
-           use_viewdirs=False, c2w_staticcam=None,
-           **kwargs):
+def render(h, w, ref_K, k_ref, coords=None, chunk=1024 * 32, rays=None, target_pose=None, ref_poses=None, ref_rgbs=None,sh=None,**kwargs):
     """Render rays
     Args:
       H: int. Height of image in pixels.
@@ -228,46 +227,6 @@ def render(H, h, W, w, K, ref_K, k_ref, coords=None, chunk=1024 * 32, rays=None,
       acc_map: [batch_size]. Accumulated opacity (alpha) along a ray.
       extras: dict with everything returned by render_rays().
     """
-    if c2w is not None:
-        # special case to render full image
-        rays_o, rays_d = get_rays(H, W, K, c2w)
-    else:
-        # use provided ray batch
-        rays_o, rays_d = rays
-
-    if coords is None:
-        coords = torch.stack(torch.meshgrid(torch.linspace(0, H - 1, H), torch.linspace(0, W - 1, W)), -1)  # (H, W, 2)
-        coords = torch.reshape(coords, [-1, 2])  # (H * W, 2)
-        coords = coords.type_as(rays_o) / W
-
-    if use_viewdirs:
-        # provide ray directions as input
-        viewdirs = rays_d
-        if c2w_staticcam is not None:
-            # special case to visualize effect of viewdirs
-            rays_o, rays_d = get_rays(H, W, K, c2w_staticcam)
-        viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
-        viewdirs = torch.reshape(viewdirs, [-1, 3]).float()
-
-    sh = rays_d.shape  # [..., 3]
-    if ndc:
-        # for forward facing scenes
-        rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
-
-    # Create ray batch
-    rays_o = torch.reshape(rays_o, [-1, 3]).float()
-    rays_d = torch.reshape(rays_d, [-1, 3]).float()
-
-    near, far = near * torch.ones_like(rays_d[..., :1]), far * torch.ones_like(rays_d[..., :1])
-    rays = torch.cat([rays_o, rays_d, near, far], -1)
-    if use_viewdirs:
-        rays = torch.cat([rays, viewdirs], -1)
-
-    kwargs.update({
-        'origin_K': K,
-        'origin_H': H,
-        'origin_W': W
-    })
 
     # Render and reshape
     all_ret = render_rays(rays, coords, target_pose, ref_poses, ref_rgbs, h, w, ref_K, k_ref, **kwargs)
@@ -284,6 +243,8 @@ def render(H, h, W, w, K, ref_K, k_ref, coords=None, chunk=1024 * 32, rays=None,
 def render_path(render_poses, hwf, K, k_ref, chunk, ref_poses, ref_rgbs, render_kwargs,
                 gt_imgs=None, savedir=None, render_factor=0):
     H, W, focal = hwf
+    near = 0.
+    far = 1.
 
     if render_factor != 0:
         # Render downsampled for speed
@@ -294,26 +255,85 @@ def render_path(render_poses, hwf, K, k_ref, chunk, ref_poses, ref_rgbs, render_
     rgbs0 = []
     rgbs1 = []
     depths = []
-    mean_warps = []
+    depths0 = []
     psnrs = []
 
     t = time.time()
     t1, t2 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     for i, c2w in enumerate(tqdm(render_poses)):
-        # print(i, time.time() - t)
-        # t1.record(n)
-        rgb0, rgb1, depth_map, extras = render(H, H, W, W, K, torch.Tensor(K.copy()).to(device), k_ref,
-                                                       target_pose=c2w, ref_poses=ref_poses,
-                                                       ref_rgbs=ref_rgbs, chunk=chunk, c2w=c2w[:3, :4],
-                                                       **render_kwargs)
-        # t2.record()
-        # torch.cuda.synchronize(device=device)
-        # print('Render path time:', t1.elapsed_time(t2))
+        # prepare input
+        rays_o, rays_d = get_rays(H, W, K, c2w)
+        coords = torch.stack(torch.meshgrid(torch.linspace(0, H - 1, H), torch.linspace(0, W - 1, W)), -1)  # (H, W, 2)
+        coords = torch.reshape(coords, [-1, 2])  # (H * W, 2)
+        coords = coords.type_as(rays_o) / W
+
+        viewdirs = rays_d
+        viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
+        viewdirs = torch.reshape(viewdirs, [-1, 3]).float()
+
+        sh = rays_d.shape  # [..., 3]
+        # for forward facing scenes
+        origin_rays_o, origin_rays_d = rays_o, rays_d
+        rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
+
+        # Create ray batch
+        rays_o = torch.reshape(rays_o, [-1, 3]).float()
+        rays_d = torch.reshape(rays_d, [-1, 3]).float()
+
+        origin_rays_o = torch.reshape(origin_rays_o, [-1, 3]).float()
+        origin_rays_d = torch.reshape(origin_rays_d, [-1, 3]).float()
+
+        near, far = near * torch.ones_like(rays_d[..., :1]), far * torch.ones_like(rays_d[..., :1])
+        rays = torch.cat([rays_o, rays_d, near, far], -1)
+        rays = torch.cat([rays, viewdirs], -1)
+
+        render_kwargs.update({
+            'origin_K': K,
+            'origin_H': H,
+            'origin_W': W,
+            'iteration': 1e6,
+            'origin_rays_o': origin_rays_o,
+            'origin_rays_d': origin_rays_d
+        })
+
+        # prepare point enc
+        pts, _ = compute_query_points_from_rays(rays_o, rays_d, 0, 1, render_kwargs['N_point_ray_enc'], randomize=False) # ! this is ndc space
+        pts = pts.view(-1, render_kwargs['N_point_ray_enc'] * 3)
+        mm_input_c = (pts.view(1, H, W, -1).permute(0, 3, 1, 2))
+        render_kwargs['point_enc'] = mm_input_c
+
+        if render_kwargs['use_trt']:
+            render_kwargs['mm_engine'].bind_input(mm_input_c.cpu().numpy()) # bind mm_input to mm engine
+            input_dirs = viewdirs[:, None].repeat(1,render_kwargs['N_samples'],1)
+            input_dirs_flat = input_dirs.view(-1,3)
+            embedded_dirs = render_kwargs['embeddirs_fn'](input_dirs_flat)
+            render_kwargs['nerf_engine'].bind_input_dir(embedded_dirs.cpu().numpy()) # bind viewdirs to nerf
+
+            # warmup bind for nerf
+            input_holder = torch.zeros(embedded_dirs.shape[0], 63).flatten().cuda()
+            render_kwargs['nerf_engine'].bind_input(input_holder, warmup=True)
+            _ = render_kwargs['nerf_engine'].run()
+
+            # warmup bind for refine engine
+            refine_input_holder = torch.zeros(1,24,756,1008).cuda()
+            render_kwargs['refine_engine'].bind_input(refine_input_holder, warmup=True)
+            _ = render_kwargs['refine_engine'].run()
+
+        ################# ! EVALUATE RUNNING TIME ##################
+        t1.record()
+
+        rgb0, rgb1, depth_map, extras = render(H,W,torch.Tensor(K.copy()).to(device), k_ref, coords, \
+                rays=rays, target_pose=c2w, ref_poses=ref_poses, ref_rgbs=ref_rgbs,sh=sh, **render_kwargs)
+
+        t2.record()
+        torch.cuda.synchronize(device=device)
+        print('Render path time:', t1.elapsed_time(t2))
+        # ! ########################################################
 
         rgbs0.append(rgb0.cpu().numpy())
         rgbs1.append(rgb1.cpu().numpy())
         depths.append(depth_map.cpu().numpy())
-        # mean_warps.append(mean_warp.cpu().numpy())
+        depths0.append(extras['depth_map0'].cpu().numpy())
 
         # if i == 0:
         #     print(rgb0.shape)
@@ -322,24 +342,60 @@ def render_path(render_poses, hwf, K, k_ref, chunk, ref_poses, ref_rgbs, render_
             p = mse2psnr(img2mse(rgb1, gt_imgs[i]))
             psnrs.append(p)
 
+            error = (rgb1 - gt_imgs[i])**2
+            error = error.cpu().numpy()
+            error = (error - np.min(error)) / (max(np.max(error) - np.min(error), 1e-8))
+            error = cv2.applyColorMap((error * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
+
         if savedir is not None:
             rgb8 = to8b(rgbs1[-1])
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
+            filename = os.path.join(savedir, 'err{:03d}.png'.format(i))
+            imageio.imwrite(filename, error)
+
     rgbs0 = np.stack(rgbs0, 0)
     rgbs1 = np.stack(rgbs1, 0)
     depths = np.stack(depths, 0)
-    # mean_warps = np.stack(mean_warps, 0)
+    depths0 = np.stack(depths0, 0)
 
     if len(psnrs) > 0:
         mean_psnr = 0
         for this_psnr in psnrs:
             mean_psnr = mean_psnr + this_psnr / len(psnrs)
+        print(psnrs)
         print(f'Mean Test PSNR {mean_psnr.detach().item()}')
 
-    return rgbs0, rgbs1, depths
+    return rgbs0, rgbs1, depths, depths0
 
+def model2onnx(model, in_ch, savedir, model_name, batch_size):
+    model.eval()
+    # Create dummy input for the model. It will be used to run the model inside export function.
+    
+    # Call the export function
+    fn = os.path.join(savedir, '{}.onnx'.format(model_name))
+    if model_name == 'nerf':
+        dummy_input = torch.randn(in_ch[0])[None].repeat(batch_size,1)
+        dummy_input_dir = torch.randn(in_ch[1])[None].repeat(batch_size,1)
+        torch.onnx.export(model, (dummy_input, dummy_input_dir), fn, verbose=True,
+                                    export_params=True, input_names = ['input', 'input_dir'],
+                                    output_names = ['output'],
+                                    dynamic_axes={'input' : {0 : 'batch_size'}, 'input_dir' : {0 : 'batch_size'},'output' : {0 : 'batch_size'}})
+    elif model_name == 'refine_net':
+        dummy_input = torch.randn(1,in_ch, 756, 1008)
+        torch.onnx.export(model, (dummy_input, ), fn, verbose=True,
+                                export_params=True, input_names = ['input'],
+                                    output_names = ['output'],
+                                    dynamic_axes={'input' : {0 : 'batch_size'},
+                                                    'output' : {0 : 'batch_size'},})
+    else:
+        dummy_input = torch.randn(1,in_ch, 756, 1008)
+        torch.onnx.export(model, (dummy_input, ), fn, verbose=True,
+                                export_params=True, input_names = ['input'],
+                                    output_names = ['output'],
+                                    dynamic_axes={'input' : {0 : 'batch_size'},
+                                                    'output' : {0 : 'batch_size'},})
 
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
@@ -353,7 +409,7 @@ def create_nerf(args):
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
     output_ch = 5 if args.N_importance > 0 else 4
     skips = args.netskips
-    model = NeRF(D=args.netdepth, W=args.netwidth,
+    model = NeRFTRT(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
     grad_vars.append({'params': model.parameters(), 'weight_decay': 0, 'lr': args.lrate})
@@ -370,37 +426,18 @@ def create_nerf(args):
                                                                         embeddirs_fn=embeddirs_fn,
                                                                         netchunk=args.netchunk)
 
-    # Input is coords, ray points. Output is disp, rgb0
-    # model_mmray = MinMaxRayS1Conv_Net(D=args.mmnetdepth, W=args.mmnetwidth,
-    #                               input_ch=2+input_ch*args.N_point_ray_enc if args.mm_emb else
-    #                               (3+args.k_ref*3 +3)*args.N_point_ray_enc,
-    #                               output_ch=3, skips=args.mmnetskips)
-    # model_mmray = MinMaxRayS1Conv_Net(D=args.mmnetdepth, W=args.mmnetwidth,
-    #                               input_ch=2+input_ch*args.N_point_ray_enc if args.mm_emb else
-    #                               (3+args.k_ref*3)*args.N_point_ray_enc + input_ch + input_ch_views,
-    #                               output_ch=3, skips=args.mmnetskips)
-
     model_mmray = MinMaxRayS1Conv_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                   input_ch=2+input_ch*args.N_point_ray_enc if args.mm_emb else
-                                  (3+args.k_ref*3)*args.N_point_ray_enc,
-                                  output_ch=4+2*args.N_samples, skips=args.mmnetskips)
-    # model_mmray = MinMaxRayS1Conv_Net(D=args.mmnetdepth, W=args.mmnetwidth,
-    #                               input_ch=2+input_ch*args.N_point_ray_enc if args.mm_emb else
-    #                               (3)*args.N_point_ray_enc,
-    #                               output_ch=4+2*args.N_samples, skips=args.mmnetskips)
-
-    # model_mmray = MinMaxRayS1ConvRes_Net(D=args.mmnetdepth, W=args.mmnetwidth,
-    #                               input_ch=2+input_ch*args.N_point_ray_enc if args.mm_emb else
-    #                               3*args.N_point_ray_enc, res_ch = 3*args.k_ref*args.N_point_ray_enc,
-    #                               output_ch=4+2*args.N_samples, skips=args.mmnetskips)
+                                  3*args.N_point_ray_enc,
+                                  output_ch=args.N_samples, skips=args.mmnetskips)
 
 
     grad_vars.append({'params': model_mmray.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     # Input is rgb0, mean warp, coords, ray points. Output is rgb1
-    model_refine = MinMaxRayS1_Net(D=args.mmnetdepth, W=args.mmnetwidth,
-                                  input_ch=6+input_ch*args.N_samples if args.mm_emb else 6+3*args.N_samples,
-                                  output_ch=args.N_samples * (1 + 3), skips=args.mmnetskips)
+    model_refine = MinMaxRayS1Conv_Net(D=args.mmnetdepth, W=args.mmnetwidth,
+                                  input_ch=(3+3)*args.N_samples,
+                                  output_ch=4, skips=args.mmnetskips)
     grad_vars.append({'params': model_refine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     # Create optimizer
@@ -436,6 +473,18 @@ def create_nerf(args):
             model_fine.load_state_dict(ckpt['network_fine_state_dict'])
 
     ##########################
+    # # export to onnx
+    # model2onnx(model, in_ch = [input_ch, input_ch_views], savedir = os.path.join(args.basedir, args.expname), model_name='nerf', batch_size=1)
+    # model2onnx(model_mmray, in_ch = 3*args.N_point_ray_enc, savedir = os.path.join(args.basedir, args.expname), model_name='min_max_ray_net',batch_size=1)
+    # model2onnx(model_refine, in_ch = (3+3)*args.N_samples, savedir = os.path.join(args.basedir, args.expname), model_name='model_refine',batch_size=1)
+    # breakpoint()
+
+    # ! init trt engine
+    nerf_engine, mm_engine, refine_engine = None, None, None
+    if args.use_trt:
+        nerf_engine =  NeRFEngine('logs_minmax/fern_epinerf_trt/nerf_fp16.trt')
+        mm_engine = MMEngine('logs_minmax/fern_epinerf_trt/min_max_ray_net_fp16.trt')
+        refine_engine = RefineEngine('logs_minmax/fern_epinerf_trt/model_refine_fp16.trt')
 
     render_kwargs_train = {
         'network_query_fn': network_query_fn,
@@ -452,7 +501,11 @@ def create_nerf(args):
         'N_point_ray_enc': args.N_point_ray_enc,
         'embed_fn': embed_fn,
         'embeddirs_fn':embeddirs_fn,
-        'randomize':True
+        'randomize':True,
+        'nerf_engine': nerf_engine,
+        'mm_engine':mm_engine,
+        'refine_engine': refine_engine,
+        'use_trt': args.use_trt
     }
 
     # NDC only good for LLFF-style forward facing data
@@ -477,84 +530,29 @@ def compute_query_points_from_rays(
         N_point_ray_enc,
         randomize = True
 ) -> (torch.Tensor, torch.Tensor):
-    # Linear
-    # depth_values = torch.linspace(near_thresh, far_thresh, N_point_ray_enc).to(ray_origins)
-    # depth_values = depth_values.unsqueeze(0)
 
-    # Exp.
-    depth_values = torch.linspace(1.0, 0.0, steps=N_point_ray_enc).view(1, -1).type_as(ray_origins)
-    depth_values = near_thresh * torch.exp(log(far_thresh / near_thresh) * (1-depth_values))
+    # Linear
+    depth_values = torch.linspace(near_thresh, far_thresh, N_point_ray_enc).to(ray_origins)
+    depth_values = depth_values.unsqueeze(0)
+
+    # # Exp.
+    # depth_values = torch.linspace(1.0, 0.0, steps=N_point_ray_enc).view(1, -1).type_as(ray_origins)
+    # depth_values = near_thresh * torch.exp(log(far_thresh / near_thresh) * (1-depth_values))
 
     if randomize is True:
         noise_shape = list(depth_values.shape)
         noise_ = (1/6) * torch.normal(0.0, 1.0, size=noise_shape).to(ray_origins)
         noise_ = noise_ * (far_thresh - near_thresh) / N_point_ray_enc
         depth_values = noise_ + depth_values
-        depth_values[depth_values < 0] = 0
-        depth_values, _ = torch.sort(depth_values, dim=-1)
+        depth_values[depth_values < near_thresh] = near_thresh
+        depth_values[depth_values > far_thresh] = far_thresh
+        depth_values, _ = torch.sort(depth_values, dim=-1) 
 
     query_points = ray_origins[..., None, :] + ray_directions[..., None, :] * depth_values[..., :, None]
     return query_points, depth_values
 
 
-# def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, rgb0=None,
-#                 depth_densities=None, use_res_dense=True, pytest=False):
-#     """Transforms model's predictions to semantically meaningful values.
-#     Args:
-#         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
-#         z_vals: [num_rays, num_samples along ray]. Integration time.
-#         rays_d: [num_rays, 3]. Direction of each ray.
-#     Returns:
-#         rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
-#         disp_map: [num_rays]. Disparity map. Inverse of depth map.
-#         acc_map: [num_rays]. Sum of weights along each ray.
-#         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
-#         depth_map: [num_rays]. Estimated distance to object.
-#     """
-#     raw2alpha = lambda raw, dists, act_fn=F.relu: 1. - torch.exp(-act_fn(raw) * dists)
-
-#     dists = z_vals[..., 1:] - z_vals[..., :-1]
-#     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[..., :1].shape)], -1)  # [N_rays, N_samples]
-
-#     dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
-
-#     if rgb0 is None:
-#         rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
-#     else:
-#         rgb = torch.sigmoid(rgb0) + raw[..., :3]  # [N_rays, N_samples, 3]
-
-#     noise = 0.
-#     if raw_noise_std > 0.:
-#         noise = torch.randn(raw[..., 3].shape) * raw_noise_std
-
-#         # Overwrite randomly sampled data if pytest
-#         if pytest:
-#             np.random.seed(0)
-#             noise = np.random.rand(*list(raw[..., 3].shape)) * raw_noise_std
-#             noise = torch.Tensor(noise)
-
-#     if depth_densities is not None:
-#         if use_res_dense:
-#             # alpha = 1. - torch.exp(-(F.relu(raw[..., 3] + noise) + depth_densities) * dists)
-#             alpha = raw2alpha(raw[..., 3] + depth_densities + noise, dists)  # [N_rays, N_samples]
-#         else:
-#             alpha = raw2alpha(depth_densities + noise, dists)  # [N_rays, N_samples]
-#     else:
-#         alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
-#     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
-#     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1. - alpha + 1e-10], -1), -1)[:, :-1]
-#     rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3]
-
-#     depth_map = torch.sum(weights * z_vals, -1)
-#     disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map), depth_map / (torch.sum(weights, -1) + 1e-6))
-#     acc_map = torch.sum(weights, -1)
-
-#     if white_bkgd:
-#         rgb_map = rgb_map + (1. - acc_map[..., None])
-
-#     return rgb_map, disp_map, acc_map, weights, depth_map
-def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, depth0=None, rgb0=None,
-                depth_densities=None, pytest=False):
+def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, rgb0=None, depth0=None, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -569,25 +567,50 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, depth0=N
     """
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1. - torch.exp(-act_fn(raw) * dists)
 
+    if rgb0 is None:
+        dists = z_vals[..., 1:] - z_vals[..., :-1]
+        dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[..., :1].shape)], -1)  # [N_rays, N_samples+1]
+        dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
 
-    dists = z_vals[..., 1:] - z_vals[..., :-1]
-    dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[..., :1].shape)], -1)  # [N_rays, N_samples]
+        rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
+        sigma = raw[..., 3]
+    else:
+        # cat depth 0 to z_vals
+        z_vals = torch.cat([z_vals, depth0], dim=1) # [N_rays, N_samples + 1]
+        # sort z_vals
+        sort_z_vals = torch.sort(z_vals, dim = 1)
+        z_vals = sort_z_vals[0]
 
-    dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
+        dists = z_vals[..., 1:] - z_vals[..., :-1]
+        inf_dist = torch.ones(dists[..., :1].shape, device = dists.device)*(1e10)
+        dists = torch.cat([dists, inf_dist], -1)  # [N_rays, N_samples]
+        dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
 
-    rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
+        rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
+        rgb = torch.cat([rgb, rgb0[:,None,:]], dim=1) # [N_rays, N_samples + 1, 3]
+        # sort rgb
+        rgb = rgb.gather(dim=1, index = sort_z_vals[1][...,None].repeat(1,1,3))
+
+        sigma = raw[..., 3]
+        # cat sigma with mean of sigma
+        mean_sigma = sigma.mean(dim=1, keepdim = True)
+        sigma = torch.cat([sigma, mean_sigma], dim = 1)  # [N_rays, N_samples + 1]
+        # sort sigma
+        sigma = sigma.gather(dim=1, index=sort_z_vals[1])
+
 
     noise = 0.
     if raw_noise_std > 0.:
-        noise = torch.randn(raw[..., 3].shape) * raw_noise_std
+        noise = torch.randn(sigma.shape) * raw_noise_std
 
         # Overwrite randomly sampled data if pytest
         if pytest:
             np.random.seed(0)
-            noise = np.random.rand(*list(raw[..., 3].shape)) * raw_noise_std
+            noise = np.random.rand(*list(sigma.shape)) * raw_noise_std
             noise = torch.Tensor(noise)
 
-    alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
+    alpha = raw2alpha(sigma + noise, dists)
+    
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1. - alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3]
@@ -600,7 +623,6 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, depth0=N
         rgb_map = rgb_map + (1. - acc_map[..., None])
 
     return rgb_map, disp_map, acc_map, weights, depth_map
-
 
 
 def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, H, W, K, k_ref,
@@ -656,112 +678,94 @@ def render_rays(ray_batch, coords, target_pose, ref_poses, ref_rgbs, H, W, K, k_
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[:, 0:3], ray_batch[:, 3:6]  # [N_rays, 3] each
     viewdirs = ray_batch[:, -3:] if ray_batch.shape[-1] > 8 else None
-    bounds = torch.reshape(ray_batch[..., 6:8], [-1, 1, 2])
-    near, far = bounds[0, 0, 0], bounds[0, 0, 1]  # [-1,1]
+    near, far = 0. , 1.
 
+    # 1. mm take point encoding and predict N samples points
+    if kwargs['use_trt']:
+        min_max_rays = kwargs['mm_engine'].run()
+    else:
+        mm_input_c = kwargs['point_enc']
+        min_max_rays = min_max_ray_net(mm_input_c)
+
+    depth_values = torch.sigmoid(min_max_rays) * (far - near) + near  # B, Nsamples, H, W
+    depth_values = depth_values.squeeze(0).view(-1, H*W).transpose(0,1) # H*W, Nsamples # ! this is important output: ndc point samplings
+
+    sort_out = torch.sort(depth_values, dim=-1)
+    depth_values_refine_net = sort_out[0] # ! depth values are sorted
+    query_points_refine_net = rays_o[..., None, :] + rays_d[..., None, :] * depth_values_refine_net[..., :, None] # ! this is ndc space
+
+    # 2. Feed sampling points encoding and warp features to refine net, no need to random
     with torch.no_grad():
-        pts, z_vals = compute_query_points_from_rays(rays_o, rays_d, near, far, N_point_ray_enc, randomize)
+        k_ref = ref_rgbs.shape[0] # ! k_ref = 16 = all train view but remove current training
+        ref_rgbs = (ref_rgbs.view(k_ref, H, W, 3).permute(0, 3, 1, 2))
+        ref_rgbs = torch.repeat_interleave(ref_rgbs, repeats=N_samples, dim=0)        
+        ref_poses = torch.repeat_interleave(ref_poses, repeats=N_samples, dim=0)
 
-        # ref_nos = random.choices(range(ref_rgbs.shape[0]), k=k_ref)
-        # ref_nos = [10,13]
-        ref_nos = [0]
-        ref_rgb = ref_rgbs[ref_nos].view(k_ref, H, W, 3)
-        # ref_rgb = torch.permute(ref_rgb, (0, 3, 1, 2))
-        ref_rgb = (ref_rgb.permute(0, 3, 1, 2))
-        ref_rgb = torch.repeat_interleave(ref_rgb, repeats=N_point_ray_enc, dim=0)
-        ref_pose = ref_poses[ref_nos]  
-        
-        ref_pose = torch.repeat_interleave(ref_pose, repeats=N_point_ray_enc, dim=0)
-
-        depths = z_vals.view(1, 1, 1, N_point_ray_enc).repeat(k_ref, H, W, 1) # k_ref, H, W, N_point_ray_enc
-        depths = (depths.permute(0, 3, 1, 2)).reshape(-1, H, W)  # k_ref * N_point_ray_enc, H, W
-
+        depths = depth_values_refine_net.view(1, H, W, N_samples).repeat(k_ref, 1, 1, 1) # k_ref, H, W, N_samples
+        depths = (depths.permute(0, 3, 1, 2)).reshape(-1, H, W)  # k_ref * N_samples, H, W
         ro1, rd1 = torch.transpose(rays_o, 0, 1).unsqueeze(0), torch.transpose(rays_d, 0, 1).unsqueeze(0)  # 1, 3, H*W
-        ro1, rd1 = ro1.repeat(N_point_ray_enc * k_ref, 1, 1), rd1.repeat(N_point_ray_enc * k_ref, 1, 1)
-        repeat_K = K.unsqueeze(0).repeat(N_point_ray_enc * k_ref, 1, 1)
-        inv_K = torch.inverse(repeat_K)
+        ro1, rd1 = ro1.repeat(N_samples * k_ref, 1, 1), rd1.repeat(N_samples * k_ref, 1, 1)
+        ndc_points = ro1 + rd1 * depths.view(depths.shape[0], 1, -1)
+        world_points = get_world_from_ndc(kwargs['origin_H'], kwargs['origin_W'], kwargs['origin_K'][0,0], ndc_points.permute(0,2,1).reshape(-1,3)) # ! this is 3d space points
+        world_points = world_points.reshape(k_ref*N_samples, H*W, 3).permute(0,2,1)
+        repeat_K = K.unsqueeze(0).repeat(N_samples * k_ref, 1, 1)
 
-        warps = inverse_warp.inverse_warp_rod1_rt2(ref_rgb, depths, ro1, rd1, ref_pose, repeat_K, inv_K, padding_mode='zeros')
+        warps = inverse_warp.inverse_warp_rod1_rt2_v2(ref_rgbs, depths, world_points, ref_poses, repeat_K, padding_mode='zeros')
         invalid_warp = (torch.sum(warps.detach(), 1, True) == 0).type_as(warps)
         warps = warps * (1 - invalid_warp) - invalid_warp # make invalid regions -1
 
-        laplace = kornia.filters.Laplacian(3) #laplace kernel
-        warps = laplace(warps)
-
+        warps = warps.view(k_ref, N_samples,3,H,W).mean(0) # get mean warp
         warps_flat = (warps.permute(2, 3, 0, 1))
-        warps_flat = warps_flat.view(H * W, k_ref * N_point_ray_enc *3)
+        warps_flat = warps_flat.view(H * W, N_samples *3)
+    
+    query_points_refine_net = query_points_refine_net.view(-1, N_samples * 3) # ! this is ndc space
+    refine_input = torch.cat((warps_flat, query_points_refine_net), 1)
+    refine_input_c = (refine_input.view(1, H, W, -1).permute(0, 3, 1, 2))
+    if kwargs['use_trt']:
+        kwargs['refine_engine'].bind_input(refine_input_c)
+        refine_outputs = kwargs['refine_engine'].run()
+    else:
+        refine_outputs = refine_net(refine_input_c)
+    rgb0  = torch.sigmoid(refine_outputs[:,:3])
+    rgb0 = rgb0.view(3, H*W).permute(1, 0)
+    depth0  = torch.sigmoid(refine_outputs[:, 3::]) * (far - near) + near # ! this is ndc space
+    depth0 = depth0.squeeze(0).view(-1, H*W).transpose(0,1)
 
-    pts = pts.view(-1, N_point_ray_enc * 3)
-    mm_input = torch.cat((warps_flat, pts), 1)
-    mm_input_c = (mm_input.view(1, H, W, -1).permute(0, 3, 1, 2))
-    min_max_rays = min_max_ray_net(mm_input_c)
-
-    depth_values = torch.sigmoid(min_max_rays[:, 0:N_samples]) * (far - near) + near
-    depth_values = depth_values.squeeze(0).view(-1, H*W).transpose(0,1)
-
-    depth_densities = torch.relu(min_max_rays[:, N_samples:N_samples * 2])
-    depth_densities = depth_densities.squeeze(0).view(-1, H*W).transpose(0,1)
-
-    min_rays = depth_values[:, 0, None]
-    max_rays = depth_values[:, -1, None]
-    # ! where rasterize of ray-tracing
-    # dst = torch.sigmoid(min_max_rays[:, N_samples * 2, None])
-
-    mm_rgb = None
-    if min_max_rays.shape[1] > N_samples * 2 + 1:
-        mm_rgb = min_max_rays[:, N_samples * 2 + 1::]
-
+    # 3. sampling points randomize and feed to nerf
     if randomize is True:
-        # ray_origins: (N_rays, 3)
         noise_shape = list(rays_o.shape[:-1]) + [N_samples]
-        # depth_values: (num_samples)
-        noise_ = (1 / 5) * torch.normal(0.0, 1.0,
-                                        size=noise_shape).to(rays_o)
+        noise_ = (1/10) * torch.normal(0.0, 1.0, size=noise_shape).to(rays_o)
+        sort_out = torch.sort(depth_values, dim=-1)
+        min_rays = sort_out[0][:, 0, None]
+        max_rays = sort_out[0][:, -1, None]
         noise_ = noise_ * (max_rays.detach() - min_rays.detach()) / N_samples
-        depth_values = noise_ + depth_values
-        depth_values[depth_values < 0] = 0
-    sort_out = torch.sort(depth_values, dim=-1)
-    depth_values = sort_out[0]
-    depth_densities = depth_densities.reshape( -1)[sort_out[1].view(-1)].view(depth_densities.shape)
-    # [N_rays, N_samples, 3] = (N_rays 1, 3) + (N_rays, 1, 3) * (1, N_samples, 1)
-    # query_points: [N_rays, N_samples, 3]
-    query_points = rays_o[..., None, :] + \
-        rays_d[..., None, :] * depth_values[..., :, None]
+        depth_values_nerf = noise_ + depth_values
 
-    # if randomize is True:
-    #     noise_shape = list(rays_o.shape[:-1]) + [N_samples]
-    #     noise_ = (1/6) * torch.normal(0.0, 1.0, size=noise_shape).to(rays_o)
-    #     sort_out = torch.sort(z_vals, dim=-1)
-    #     min_rays = sort_out[0][:, 0, None]
-    #     max_rays = sort_out[0][:, -1, None]
-    #     noise_ = noise_ * (max_rays.detach() - min_rays.detach()) / N_samples
-    #     depth_values = noise_ + depth_values
-    #     depth_values[depth_values < 0] = 0
-    # sort_out = torch.sort(depth_values, dim=-1)
-    # depth_values = sort_out[0]
-    # query_points = rays_o[..., None, :] + rays_d[..., None, :] * depth_values[..., :, None]
+        # ! ndc ray distance is between 0, 1
+        depth_values_nerf[depth_values_nerf < near] = near
+        depth_values_nerf[depth_values_nerf > far] = far
+    else:
+        depth_values_nerf = depth_values
+    sort_out = torch.sort(depth_values_nerf, dim=-1)
+    depth_values_nerf = sort_out[0] # ! depth values are sorted
+    query_points_nerf = rays_o[..., None, :] + rays_d[..., None, :] * depth_values_nerf[..., :, None] # ! this is ndc space
 
+    if kwargs['use_trt']:
+        flat_query_points = query_points_nerf.view(-1, 3)
+        embed_xyz = embed_fn(flat_query_points).flatten()
+        kwargs['nerf_engine'].bind_input(embed_xyz) # bind query points to nerf
+        raw = kwargs['nerf_engine'].run()
+        raw = raw.view(N_rays, N_samples, -1)
+    else:
+        raw = network_query_fn(query_points_nerf, viewdirs, network_fn)
 
-    raw = network_query_fn(query_points, viewdirs, network_fn)
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, depth_values, rays_d, raw_noise_std, white_bkgd,
-                                                                     depth_densities=depth_densities, pytest=pytest)
+    # 4. Merge nerf raw and prior mmrgb
+    if kwargs['iteration'] < 10000:
+        rgb_map, _, _, _, depth_map = raw2outputs(raw, depth_values_nerf, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    else:
+        rgb_map, _, _, _, depth_map = raw2outputs(raw, depth_values_nerf, rays_d, raw_noise_std, white_bkgd, rgb0=rgb0, depth0= depth0,pytest=pytest)
 
-    # ! warp for reprojection loss
-    world_points = rays_o + rays_d * depth_map.view(-1, 1)
-    warps = bwd_warp(kwargs['origin_H'], kwargs['origin_W'], kwargs['origin_K'], world_points,
-                     kwargs['ref_rgbs_full'], ref_poses, H, W)
-
-    rgb0 = (mm_rgb.view(3, H*W).permute(1, 0))
-
-    ret = {'rgb_map0': rgb0, 'rgb_map1': rgb_map, 'depth_map':depth_map}
-
-    warps = (warps.permute(0, 2, 3, 1))
-    for i in range(warps.shape[0]):
-        ret[f'warp_{i}'] = warps[i].view(-1, 3)
-
-    for k in ret:
-        if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
-            print(f"! [Numerical Error] {k} contains nan or inf.")
+    ret = {'rgb_map0': rgb0, 'rgb_map1': rgb_map, 'depth_map':depth_map, 'depth_map0': depth0}
 
     return ret
 
@@ -794,7 +798,6 @@ def train():
         if args.no_ndc:
             near = np.ndarray.min(bds) * .9
             far = np.ndarray.max(bds) * 1.
-
         else:
             near = 1e-6
             far = 1.
@@ -854,8 +857,8 @@ def train():
             [0, 0, 1]
         ])
 
-    if args.render_test:
-        render_poses = np.array(poses[i_test])
+    # if args.render_test:
+    #     render_poses = np.array(poses[i_test])
 
     # Create log dir and copy the config file
     basedir = args.basedir
@@ -885,33 +888,6 @@ def train():
     # Move testing data to GPU
     render_poses = torch.Tensor(render_poses).to(device)
 
-    # Short circuit if only rendering out from trained model
-    if args.render_only:
-        print('RENDER ONLY')
-        with torch.no_grad():
-            if args.render_test:
-                # render_test switches to test poses
-                images = images[i_test]
-            else:
-                # Default is smoother render_poses path
-                images = None
-
-            testsavedir = os.path.join(basedir, expname,
-                                       'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
-            os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', render_poses.shape)
-
-            render_outputs = render_path(render_poses, hwf, K, args.k_ref, args.chunk, render_kwargs_test, gt_imgs=images,
-                                  savedir=testsavedir, render_factor=args.render_factor)
-            rgbs = render_outputs[1]
-            print('Done rendering', testsavedir)
-            imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
-
-            return
-
-    # Prepare raybatch tensor if batching random rays
-    N_rand = args.N_rand
-
     # Get all rays ready in memory
     print('get rays')
     rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:, :3, :4]], 0)  # [N, ro+rd, H, W, 3]
@@ -927,233 +903,49 @@ def train():
     poses = torch.Tensor(poses).to(device)
     poses_train = torch.stack([poses[i] for i in i_train], 0)
     rays_rgb = torch.Tensor(rays_rgb).to(device)
-    K_ten = torch.Tensor(K.copy()).to(device)
 
-    N_iters = 2000000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
     print('VAL views are', i_val)
 
-    start = start + 1
-    a_sch = 1000
-    for i in trange(start, N_iters):
-        # Random from one image
-        img_i = np.random.choice(rays_rgb.shape[0])
-        # img_i = np.random.choice(np.arange(1,rays_rgb.shape[0]))
         
-
-        # # Reference data
-        # ref_poses = [poses_train[n_ref] for n_ref in range(rays_rgb.shape[0]) if n_ref != img_i]
-        # ref_poses = torch.stack(ref_poses, 0)
-        # ref_rgbs = [rays_rgb[n_ref, :, :, 2, :] for n_ref in range(rays_rgb.shape[0]) if n_ref != img_i]
-        # ref_rgbs = torch.stack(ref_rgbs, 0)
-
-        # Reference data
-        ref_poses = [poses_train[n_ref] for n_ref in range(rays_rgb.shape[0])]
-        ref_poses = torch.stack(ref_poses, 0)
-        ref_rgbs = [rays_rgb[n_ref, :, :, 2, :] for n_ref in range(rays_rgb.shape[0])]
-        ref_rgbs = torch.stack(ref_rgbs, 0)
-
-        # target data
-        these_rays_rgb = rays_rgb[img_i]
-        rays_o = these_rays_rgb[:, :, 0, :]
-        rays_d = these_rays_rgb[:, :, 1, :]
-        target = these_rays_rgb[:, :, 2, :]
-        pose = poses_train[img_i, :3, :4]
-        coords = torch.stack(torch.meshgrid(torch.linspace(0, H - 1, H), torch.linspace(0, W - 1, W)), -1)  # (H, W, 2)
-
-        # Random crop
-        if i < args.precrop_iters:
-            dH = int(H // 2 * args.precrop_frac)
-            dW = int(W // 2 * args.precrop_frac)
-            coords = torch.stack(
-                torch.meshgrid(
-                    torch.linspace(H // 2 - dH, H // 2 + dH - 1, 2 * dH),
-                    torch.linspace(W // 2 - dW, W // 2 + dW - 1, 2 * dW)
-                ), -1)
-            x1 = W // 2 - dW
-            y1 = H // 2 - dH
-            ref_K = K_ten.clone()
-            ref_K[0, 2] = K_ten[0, 2] - x1
-            ref_K[1, 2] = K_ten[1, 2] - y1
-            if i == start:
-                print(f"[Config] Center cropping of size "
-                      f"{2 * dH} x {2 * dW} is enabled until iter {args.precrop_iters}")
-        else:
-            th, tw = args.rand_crop_size, args.rand_crop_size
-            x1 = random.randint(0, W - tw)
-            y1 = random.randint(0, H - th)
-            coords = coords[y1: y1 + th, x1: x1 + tw, :]
-            ref_K = K_ten.clone()
-            ref_K[0, 2] = ref_K[0, 2] - x1
-            ref_K[1, 2] = ref_K[1, 2] - y1
-
-        th, tw, _ = coords.shape
-        # print(f'coords shape {coords.shape}')
-        coords = torch.reshape(coords, [-1, 2])  # (H * W, 2)
-        select_coords = coords.long()  # (N_rand, 2)
-        rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
-        rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
-        batch_rays = torch.stack([rays_o, rays_d], 0)
-        target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
-        ref_rgbs_full = ref_rgbs.clone()
-        render_kwargs_train['ref_rgbs_full'] = ref_rgbs_full
-        render_kwargs_test['ref_rgbs_full'] = ref_rgbs_full
-        ref_rgbs = ref_rgbs[:, select_coords[:, 0], select_coords[:, 1]] # (N_ref, N_rand, 3)
-        
-        # print(f'reference RGBs shape {ref_rgb.shape}')
-
-        #####  Core optimization loop  #####
-        rgb0, rgb1, depth_map, extras = render(H, th, W, tw, K, ref_K, args.k_ref, target_pose=pose, ref_poses=ref_poses,
-                                                     ref_rgbs=ref_rgbs, coords=coords.type_as(batch_rays)/W,
-                                                     chunk=args.chunk, rays=batch_rays, verbose=i < 10,
-                                                     retraw=True, **render_kwargs_train)
-
-        optimizer.zero_grad()
-        img_loss = img2mse(rgb1, target_s)
-        rgb0_loss = img2mse(rgb0, target_s)
-
-        # warp_errors = []
-        # valid_masks = []
-        # for num_ref in range(ref_rgbs.shape[0]):
-        #     this_warped_view = extras[f'warp_{num_ref}']
-        #     valid_masks.append((torch.sum(this_warped_view.detach(), dim=1) != 0).type_as(this_warped_view))
-        #     warp_errors.append(torch.mean((this_warped_view - target_s) ** 2, dim=1))
-        # warp_errors = torch.stack(warp_errors, 0) # Nref, HxW
-        # valid_masks = torch.stack(valid_masks, 0) # Nref, HxW
-        # sort_outs = torch.sort(warp_errors, dim=0) # sort errors and use half
-        # warp_errors = sort_outs[0]
-        # valid_masks = valid_masks.view(-1)[sort_outs[1].detach().view(-1)].view(valid_masks.shape)
-        # warp_loss = torch.sum(valid_masks[0:ref_rgbs.shape[0]//4] * warp_errors[0:ref_rgbs.shape[0]//4]) / \
-        #             (torch.sum(valid_masks[0:ref_rgbs.shape[0]//4]) + 1e-6)
-
-        # warp_loss = []
-        # for num_ref in range(ref_rgbs.shape[0]):
-        #     this_warped_view = extras[f'warp_{num_ref}']
-        #     warp_loss += [(this_warped_view - target_s)**2]
-        # warp_loss = torch.stack(warp_loss, dim=0)
-        # warp_loss, _ = torch.topk(
-        #     warp_loss, ref_rgbs.shape[0] // 2, dim=0, largest=False)
-        # warp_loss = warp_loss.mean()
-
-
-        perc_loss = 0
-        perc0_loss = 0
-        if args.a_p > 0 and i >= a_sch:
-            # reshape for vgg (B, C, H, W)
-            rgb_predicted_ = (rgb1.view(th, tw, 3).clone().permute(2, 0, 1)).unsqueeze(0)
-            target_img_ = (target_s.view(th, tw, 3).clone().permute(2, 0, 1)).unsqueeze(0)
-            perc_loss = args.a_p * perceptual_loss(vgg(rgb_predicted_), vgg(target_img_))
-
-            # rgb0_predicted_ = (rgb0.view(th, tw, 3).clone().permute(2, 0, 1)).unsqueeze(0)
-            # perc0_loss = args.a_p * perceptual_loss(vgg(rgb0_predicted_), vgg(target_img_))
-
-        loss = img_loss + perc_loss + rgb0_loss + perc0_loss
-
-        psnr = mse2psnr(img_loss)
-        psnr0 = mse2psnr(rgb0_loss)
-
-        # if 'mean_rbg0' in extras and args.a_mmrgb > 0:
-        #     img_loss0 = img2mse(extras['mean_rbg0'], target_s)
-        #     loss = loss + img_loss0
-
-        loss.backward()
-        optimizer.step()
-
-        # NOTE: IMPORTANT!
-        ###   update learning rate   ###
-        decay_rate = 0.1
-        decay_steps = args.lrate_decay * 1000
-        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = new_lrate
-        ################################
-
-        # Rest is logging
-        if i % 500 == 0:
-            if not os.path.exists(os.path.join(basedir, expname, 'debug')):
-                os.makedirs(os.path.join(basedir, expname, 'debug'))
-
-            rgb8 = to8b(target_s.view(th, tw, 3).detach().cpu().numpy())
-            filename = os.path.join(basedir, expname, 'debug', 'check_target.png')
-            imageio.imwrite(filename, rgb8)
-
-            rgb8 = to8b(rgb1.view(th, tw, 3).detach().cpu().numpy())
-            filename = os.path.join(basedir, expname, 'debug', 'check_sinth.png')
-            imageio.imwrite(filename, rgb8)
-
-            # np_depth = depth.view(th, tw).detach().cpu().numpy()
-            # rgb8 = to8b(np_depth / np.percentile(np_depth, 99))
-            # filename = os.path.join(basedir, expname, 'debug', 'check_depth.png')
-            # imageio.imwrite(filename, rgb8)
-
-            for num_ref in range(ref_rgbs.shape[0]):
-                rgb8 = to8b(extras[f'warp_{num_ref}'].view(th, tw, 3).detach().cpu().numpy())
-                filename = os.path.join(basedir, expname, 'debug', f'check_warp_{num_ref}.png')
-                imageio.imwrite(filename, rgb8)
-
-        if i % args.i_weights == 0:
-            print(f'New learning rate: {new_lrate}')
-            path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
-            if args.N_importance > 0:
-                torch.save({
-                    'global_step': global_step,
-                    'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                    'mmr_network_fn_state_dict': render_kwargs_train['min_max_ray_net'].state_dict(),
-                    'refine_net_state_dict': render_kwargs_train['refine_net'].state_dict(),
-                    'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                }, path)
-                print('Saved checkpoints at', path)
-            else:
-                torch.save({
-                    'global_step': global_step,
-                    'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                    'mmr_network_fn_state_dict': render_kwargs_train['min_max_ray_net'].state_dict(),
-                    'refine_net_state_dict': render_kwargs_train['refine_net'].state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                }, path)
-                print('Saved checkpoints at', path)
-
-        if i % args.i_video == 0 and i > 0:
-            # Turn on testing mode
-            with torch.no_grad():
-                r_out = render_path(render_poses, hwf, K, args.k_ref, args.chunk, ref_poses=poses_train,
-                                    ref_rgbs=rays_rgb[:, :, :, 2, :], render_kwargs=render_kwargs_test)
-                rgbs0, rgbs1, depths = r_out[0], r_out[1], r_out[2]
-            print('Done, saving', rgbs0.shape)
-            moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-            imageio.mimwrite(moviebase + 'rgb0.mp4', to8b(rgbs0), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'rgb1.mp4', to8b(rgbs1), fps=30, quality=8)
-            # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths / np.percentile(depths, 99)), fps=30, quality=8)
-            # print(f'Mean depth {np.mean(depths)}')
-
-        # if args.use_viewdirs:
-            #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
-            #     with torch.no_grad():
-            #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-            #     render_kwargs_test['c2w_staticcam'] = None
-            #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
-
-        if i % args.i_testset == 0 and i > 0:
-            testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
+    if (args.render_only):
+        # Turn on testing mode
+        with torch.no_grad():
+            r_out = render_path(render_poses, hwf, K, args.k_ref, args.chunk, ref_poses=poses_train,
+                                ref_rgbs=rays_rgb[:, :, :, 2, :], render_kwargs=render_kwargs_test)
+            rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
+        print('Done, saving', rgbs0.shape)
+        if args.render_only:
+            testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
             os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', poses[i_test].shape)
-            with torch.no_grad():
-                render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.k_ref, args.chunk, ref_poses=poses_train,
-                            ref_rgbs=rays_rgb[:, :, :, 2, :], render_kwargs=render_kwargs_test,
-                            gt_imgs=images[i_test], savedir=testsavedir)
-            print('Saved test set')
+            moviebase = os.path.join(testsavedir, '{}_spiral_trt')
+        else:
+            moviebase = os.path.join(basedir, expname, '{}_spiral_trt')
+        imageio.mimwrite(moviebase + 'rgb0.mp4', to8b(rgbs0), fps=30, quality=8)
+        imageio.mimwrite(moviebase + 'rgb1.mp4', to8b(rgbs1), fps=30, quality=8)
+        imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths / np.percentile(depths, 99)), fps=30, quality=8)
+        imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 / np.percentile(depths0, 99)), fps=30, quality=8)
+        if args.render_only:
+            return
 
-        if i % args.i_print == 0:
-            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()} PSNR0: {psnr0.item()}")
-
-        global_step += 1
-
+    if (args.render_test):
+        if args.render_test:
+            testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+            os.makedirs(testsavedir, exist_ok=True)
+        else:
+            testsavedir = os.path.join(basedir, expname, 'testset_trt')
+        os.makedirs(testsavedir, exist_ok=True)
+        print('test poses shape', poses[i_test].shape)
+        with torch.no_grad():
+            render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.k_ref, args.chunk, ref_poses=poses_train,
+                        ref_rgbs=rays_rgb[:, :, :, 2, :], render_kwargs=render_kwargs_test,
+                        gt_imgs=images[i_test], savedir=testsavedir)
+        print('Saved test set')
+        if args.render_test:
+            return
 
 if __name__ == '__main__':
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
-
     train()
