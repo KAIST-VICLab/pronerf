@@ -1,13 +1,13 @@
-expname = fern_epinerf_ap_m1_1k_exp_pretrained_fine_nofuse_norand
+expname = fern_epinerf_ap_m1_1k_exp_pretrained_nofuse_epi_2samples
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
 
 factor = 4
 llffhold = 8
-k_ref = 16
+k_ref = 1
 
 N_rand = 1024
-N_samples = 4
+N_samples = 2
 N_importance = 0
 
 use_viewdirs = True

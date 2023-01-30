@@ -1,4 +1,4 @@
-expname = fern_baseline_400
+expname = fern_baseline_128
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
 
@@ -7,7 +7,7 @@ llffhold = 8
 k_ref = 16
 
 N_rand = 1024
-N_samples = 400
+N_samples = 128
 N_importance = 0
 
 use_viewdirs = True
