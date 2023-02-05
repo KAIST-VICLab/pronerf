@@ -1,6 +1,7 @@
 import os, sys
 gpu_n = '6'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
+print(f'Training on GPU {gpu_n}')
 import numpy as np
 import imageio
 import json
@@ -148,46 +149,32 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
     rgbs = []
     disps = []
-    depths = []
-    psnrs = []
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
         print(i, time.time() - t)
         t = time.time()
-        rgb, disp, acc, extras = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
-        depths.append(extras['depth_map'].cpu().numpy())
         if i==0:
             print(rgb.shape, disp.shape)
 
         
         if gt_imgs is not None and render_factor==0:
-            # p = mse2psnr(img2mse(rgb, gt_imgs[i]))
-            # psnrs.append(p)
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
-            psnrs.append(p)
+            print('psnr', p)
+        
 
         if savedir is not None:
-            # rgb8 = to8b(rgbs[-1])
-            # filename = os.path.join(savedir, '{:03d}.png'.format(i))
-            # imageio.imwrite(filename, rgb8)
-
-            rgb8 = to8b(depths[-1]/np.max(depths[-1]))
+            rgb8 = to8b(rgbs[-1])
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
-              
-    # if len(psnrs) > 0:
-    #     mean_psnr = 0
-    #     for this_psnr in psnrs:
-    #         mean_psnr = mean_psnr + this_psnr / len(psnrs)
-    #     print(f'Mean Test PSNR {mean_psnr.detach().item()}')
+
 
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
-    depths = np.stack(depths, 0)
-    breakpoint()  
+
     return rgbs, disps
 
 
@@ -195,6 +182,7 @@ def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
+
     input_ch_views = 0
     embeddirs_fn = None
     if args.use_viewdirs:
@@ -203,21 +191,14 @@ def create_nerf(args):
     skips = [4]
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
-                 input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
-    # coarse_weight = np.load('logs/fern_example/model_200000.npy', allow_pickle=True)
-    # model.load_weights_from_keras(coarse_weight)
-    model.to(device)
-
+                 input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
     grad_vars = list(model.parameters())
 
     model_fine = None
     if args.N_importance > 0:
         model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
                           input_ch=input_ch, output_ch=output_ch, skips=skips,
-                          input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
-        # fine_weight = np.load('logs/fern_example/model_fine_200000.npy', allow_pickle=True)
-        # model_fine.load_weights_from_keras(fine_weight)
-        model_fine.to(device)
+                          input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
         grad_vars += list(model_fine.parameters())
 
     network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
@@ -402,6 +383,7 @@ def render_rays(ray_batch,
 
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
+
 #     raw = run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
@@ -423,7 +405,7 @@ def render_rays(ray_batch,
 
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
-    ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map, 'depth_map':depth_map, 'weights':weights, 'z_vals':z_vals}
+    ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     if retraw:
         ret['raw'] = raw
     if N_importance > 0:
@@ -443,7 +425,7 @@ def config_parser():
 
     import configargparse
     parser = configargparse.ArgumentParser()
-    parser.add_argument('--config', is_config_file=True, default='configs/lego.txt',
+    parser.add_argument('--config', is_config_file=True, 
                         help='config file path')
     parser.add_argument("--expname", type=str, 
                         help='experiment name')
@@ -463,7 +445,7 @@ def config_parser():
                         help='channels per layer in fine network')
     parser.add_argument("--N_rand", type=int, default=32*32*4, 
                         help='batch size (number of random rays per gradient step)')
-    parser.add_argument("--lrate", type=float, default=1e-3,
+    parser.add_argument("--lrate", type=float, default=5e-4, 
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250, 
                         help='exponential learning rate decay (in 1000 steps)')
@@ -479,7 +461,7 @@ def config_parser():
                         help='specific weights npy file to reload for coarse network')
 
     # rendering options
-    parser.add_argument("--N_samples", type=int, default=64,
+    parser.add_argument("--N_samples", type=int, default=64, 
                         help='number of coarse samples per ray')
     parser.add_argument("--N_importance", type=int, default=0,
                         help='number of additional fine samples per ray')
@@ -540,13 +522,13 @@ def config_parser():
     # logging/saving options
     parser.add_argument("--i_print",   type=int, default=100, 
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_img",     type=int, default=5000,
+    parser.add_argument("--i_img",     type=int, default=500, 
                         help='frequency of tensorboard image logging')
     parser.add_argument("--i_weights", type=int, default=10000, 
                         help='frequency of weight ckpt saving')
-    parser.add_argument("--i_testset", type=int, default=5000,
+    parser.add_argument("--i_testset", type=int, default=50000, 
                         help='frequency of testset saving')
-    parser.add_argument("--i_video",   type=int, default=5000,
+    parser.add_argument("--i_video",   type=int, default=50000, 
                         help='frequency of render_poses video saving')
 
     return parser
@@ -641,7 +623,7 @@ def train():
         ])
 
     if args.render_test:
-        render_poses = np.array(poses[i_train])
+        render_poses = np.array(poses[i_test])
 
     # Create log dir and copy the config file
     basedir = args.basedir
@@ -677,8 +659,7 @@ def train():
         with torch.no_grad():
             if args.render_test:
                 # render_test switches to test poses
-                # images = torch.Tensor(images[i_test]).to(device)
-                images = images[i_train]
+                images = images[i_test]
             else:
                 # Default is smoother render_poses path
                 images = None
@@ -720,7 +701,6 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
-    # N_iters = 200000 + 1
     N_iters = 200000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
@@ -744,7 +724,7 @@ def train():
             i_batch += N_rand
             if i_batch >= rays_rgb.shape[0]:
                 print("Shuffle data after an epoch!")
-                rand_idx = torch.randperm(rays_rgb.shape[0])
+                rand_idx = np.random.permutation(rays_rgb.shape[0])
                 rays_rgb = rays_rgb[rand_idx]
                 i_batch = 0
 
@@ -814,21 +794,13 @@ def train():
         # Rest is logging
         if i%args.i_weights==0:
             path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
-            if args.N_importance > 0:
-                torch.save({
-                    'global_step': global_step,
-                    'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                    'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                }, path)
-                print('Saved checkpoints at', path)
-            else:
-                torch.save({
-                    'global_step': global_step,
-                    'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                }, path)
-                print('Saved checkpoints at', path)
+            torch.save({
+                'global_step': global_step,
+                'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
+                'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }, path)
+            print('Saved checkpoints at', path)
 
         if i%args.i_video==0 and i > 0:
             # Turn on testing mode
@@ -861,17 +833,13 @@ def train():
         """
             print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
             print('iter time {:.05f}'.format(dt))
-
             with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
                 tf.contrib.summary.scalar('loss', loss)
                 tf.contrib.summary.scalar('psnr', psnr)
                 tf.contrib.summary.histogram('tran', trans)
                 if args.N_importance > 0:
                     tf.contrib.summary.scalar('psnr0', psnr0)
-
-
             if i%args.i_img==0:
-
                 # Log a rendered validation view to Tensorboard
                 img_i=np.random.choice(i_val)
                 target = images[img_i]
@@ -879,21 +847,14 @@ def train():
                 with torch.no_grad():
                     rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose,
                                                         **render_kwargs_test)
-
                 psnr = mse2psnr(img2mse(rgb, target))
-
                 with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-
                     tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
                     tf.contrib.summary.image('disp', disp[tf.newaxis,...,tf.newaxis])
                     tf.contrib.summary.image('acc', acc[tf.newaxis,...,tf.newaxis])
-
                     tf.contrib.summary.scalar('psnr_holdout', psnr)
                     tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
-
-
                 if args.N_importance > 0:
-
                     with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
                         tf.contrib.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis])
                         tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])

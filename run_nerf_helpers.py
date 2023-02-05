@@ -5,11 +5,12 @@ import torch.nn.functional as F
 import numpy as np
 import torch.utils.model_zoo as model_zoo
 import torchvision.models as models
+import torch.nn.init as init
 
 
 # Misc
 img2mse = lambda x, y : torch.mean((x - y) ** 2)
-mse2psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]))
+mse2psnr = lambda x : -10. * torch.log10(x)
 to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
 
 
@@ -279,10 +280,10 @@ class SineLayer(nn.Module):
                                             np.sqrt(6 / self.in_features) / int(self.omega_0))
 
     def forward(self, input):
-        if not self.print:
-            print(self.omega_weight_0.detach())
-            print(self.phase_weight_0.detach())
-            self.print = True
+        # if not self.print:
+        #     print(self.omega_weight_0.detach())
+        #     print(self.phase_weight_0.detach())
+        #     self.print = True
         return torch.sin(self.omega_weight_0 * self.linear(input) + self.phase_weight_0)
 
     def forward_with_intermediate(self, input):
@@ -381,6 +382,17 @@ class MinMaxRayS_Net(nn.Module):
                                           SineLayer(W + input_ch, W, omega_0=1.0) for i in range(D - 1)])
 
         self.fc_output = nn.Linear(W, output_ch, bias=False)
+        # self.fc_output = nn.Linear(W, output_ch)
+        # self.init_fc_output()
+
+    # def init_fc_output(self):
+    #     m = self.fc_output
+    #     m.weight.data.fill_(0.)
+    #     m.bias.data.fill_(-3)
+    #     # init.constant_(m.weight[:-3,:],0)
+    #     # if m.bias is not None:
+    #     #     init.constant_(m.bias[:-3], -3.)
+    #     # breakpoint()
 
     def forward(self, x):
         h = x

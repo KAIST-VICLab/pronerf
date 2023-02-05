@@ -1,4 +1,4 @@
-expname = fixed_nerf_depthsup_usebatch_depthsup_8samples_density_add2mul_200k_v2_logvar
+expname = fixed_nerf_depthsup_usebatch_depthsup_8samples_density_add2mul_200k_epi2
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
 
@@ -20,7 +20,7 @@ a_mmdisp = 1.0
 mmnetdepth = 8
 mmnetwidth = 128
 mmnetskips = [10000]
-N_point_ray_enc = 32
+N_point_ray_enc = 48
 mm_emb = False
 precrop_iters = 0
 precrop_frac = 0.5
