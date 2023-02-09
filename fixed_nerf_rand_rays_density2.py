@@ -354,6 +354,8 @@ def create_nerf(args):
     embeddirs_fn = None
     grad_vars = []
     pretrain_ckpt = torch.load('logs/fern_reproduce/200000.tar')
+    # pretrain_mm_ckpt = torch.load('logs_minmax/debug/210000.tar')
+    # pretrain_mm_ckpt = torch.load('logs_minmax/debug_fixed/200000.tar')
 
     if args.use_viewdirs:
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
@@ -366,6 +368,8 @@ def create_nerf(args):
     # model.load_weights_from_keras(coarse_weight)
     model.to(device)
     model.load_state_dict(pretrain_ckpt['network_fn_state_dict'])
+    # grad_vars.append({'params': model.parameters(),
+    #             'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     model_fine = None
     model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
@@ -375,6 +379,8 @@ def create_nerf(args):
     # model_fine.load_weights_from_keras(fine_weight)
     model_fine.to(device)
     model_fine.load_state_dict(pretrain_ckpt['network_fine_state_dict'])
+    # grad_vars.append({'params': model_fine.parameters(),
+    #                 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
                                                                 embed_fn=embed_fn,
@@ -385,6 +391,12 @@ def create_nerf(args):
                                       input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
                                       3 * args.N_point_ray_enc,
                                       output_ch=3*args.N_samples + 3, skips=args.mmnetskips)
+    # model_mmray.load_state_dict(pretrain_mm_ckpt['mmr_network_fn_state_dict'])
+    
+    # model_mmray = MinMaxRaySOrder_Net(D=args.mmnetdepth, W=args.mmnetwidth,
+    #                                 input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
+    #                                 3 * args.N_point_ray_enc,
+    #                                 N_samples=args.N_samples, skips=args.mmnetskips)
     grad_vars.append({'params': model_mmray.parameters(),
                      'weight_decay': args.weight_decay, 'lr': args.lrate})
 
@@ -514,9 +526,6 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
     if mm_density_add is not None:
-        # if iter < 150000:
-        #     alpha = raw2alpha(raw[...,3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
-        # else:
         alpha = raw2alpha(raw[...,3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
         if iter > 200000:
             alpha = alpha*torch.sigmoid(mm_density_mul)
@@ -573,7 +582,9 @@ def render_rays(ray_batch,
     mm_density_add = min_max_rays[:, N_samples:2*N_samples]
     mm_density_mul = min_max_rays[:, 2*N_samples:3*N_samples]
 
-    # 3. Reparam trick
+    # 3.
+    # depth_values = (min_max_rays[:, :N_samples]) # B, Nsamples, H, W
+
     depth_values = torch.sigmoid(min_max_rays[:, :N_samples]) * (far - near) + near  # B, Nsamples, H, W
     sort_out = torch.sort(depth_values, dim=-1)
     depth_values = sort_out[0]  # ! depth values are sorted
@@ -586,7 +597,8 @@ def render_rays(ray_batch,
     raw = network_query_fn(query_points_nerf, viewdirs, network_fine)
     iter = kwargs.get('iter',1e6)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, depth_values, rays_d, raw_noise_std, white_bkgd, pytest=pytest, mm_density_add=mm_density_add, mm_density_mul=mm_density_mul, iter=iter)
-    ret = {'rgb_map0': mm_rgb, 'rgb_map1': rgb_map,'depth_map': depth_map, 'mm_rgb': mm_rgb, 'sigma': raw[..., 3], 'z_vals': depth_values}
+    # breakpoint()
+    ret = {'rgb_map0': mm_rgb, 'rgb_map1': rgb_map,'depth_map': depth_map, 'mm_rgb': mm_rgb, 'sigma': raw[..., 3], 'z_vals': depth_values, 'raw_rgb':raw[..., :3]}
     return ret
 
 
@@ -795,29 +807,14 @@ def train():
         rgb0_loss = img2mse(rgb0, target_s)
         depth_loss = img2mse(depth_map, target_depth[:,0])
 
-        # density loss
-        # density_loss = img2mse(extras['mm_density'], extras['sigma'].detach())
+        raw_rgb = extras['raw_rgb']
+        raw_rgb_loss = ((torch.sigmoid(raw_rgb)-target_s[:,None])**2).mean(dim=2)
+        min_raw_rgb_loss = (torch.min(raw_rgb_loss, dim=1)[0]).mean()
 
-        # # ! distance weighted sigma loss
-        # weighted_distance = 1- (extras['z_vals'] - extras['z_vals'].min(dim=1, keepdim=True)[0]) / (extras['z_vals'].max(dim=1, keepdim=True)[0] - extras['z_vals'].min(dim=1, keepdim=True)[0])
         neg_sigma = -(extras['sigma'])
-        # weighted_neg_sigma = torch.exp(weighted_distance)*neg_sigma
-        # # ! only multiply with valid sigma
-        sigma_loss = neg_sigma.mean() # sigma loss for density
-
-        # # maximize the variance of z_vals where sigma > 0
-        # z_vals = extras['z_vals']
-        # sigma = extras['sigma']
-        # z_vals_index = torch.ones_like(z_vals)
-        # z_vals_index[sigma < 0] = 0 # sigma < 0 has index 0, sigma > 0 has index 1
-
-        # mean_z_vals = torch_scatter.scatter_mean(z_vals, z_vals_index.long(), dim =-1)
-        # mean_z_vals_square = torch_scatter.scatter_mean(z_vals**2, z_vals_index.long(), dim =-1)
-        # positive_z_vals_var = mean_z_vals_square[:,1] - (mean_z_vals[:,1])**2
-        # # maximiz = minimize -log
-        # neg_log_var = (-torch.log(positive_z_vals_var + 1e-6)).mean()
-
-        loss = img_loss + rgb0_loss + depth_loss + (1e-4)*sigma_loss
+        sigma_loss = (neg_sigma).mean() # sigma loss for density
+        
+        loss = img_loss + rgb0_loss + depth_loss + (1e-5)*sigma_loss 
 
         psnr = mse2psnr(img_loss)
 

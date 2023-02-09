@@ -26,6 +26,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
 DEBUG = False
 
+ALPHA_INIT = 1e-2
+SHIFT = np.log(1 / (1 - ALPHA_INIT) - 1)
+
 
 def batchify(fn, chunk):
     """Constructs a version of 'fn' that applies to smaller batches.
@@ -275,7 +278,8 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
-    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+    def raw2alpha(raw, dists, act_fn=F.softplus): return 1. - \
+        torch.exp(-act_fn(raw + SHIFT) * dists)
 
     dists = z_vals[...,1:] - z_vals[...,:-1]
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
@@ -709,55 +713,42 @@ def train():
 
     # Summary writers
     # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
-    
+    t1, t2 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     start = start + 1
+    # Random from one image
+    img_i = np.random.choice(i_train)
+    target = images[img_i]
+    target = torch.Tensor(target).to(device)
+    pose = poses[img_i, :3,:4]
+
+    i=1
+    if N_rand is not None:
+        rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
+
+        if i < args.precrop_iters:
+            dH = int(H//2 * args.precrop_frac)
+            dW = int(W//2 * args.precrop_frac)
+            coords = torch.stack(
+                torch.meshgrid(
+                    torch.linspace(H//2 - dH, H//2 + dH - 1, 2*dH), 
+                    torch.linspace(W//2 - dW, W//2 + dW - 1, 2*dW)
+                ), -1)
+            if i == start:
+                print(f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}")                
+        else:
+            coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
+        
+        coords = torch.reshape(coords, [-1,2])  # (H * W, 2)
+        select_inds = np.random.choice(coords.shape[0], size=[N_rand], replace=False)  # (N_rand,)
+        select_coords = coords[select_inds].long()  # (N_rand, 2)
+        rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+        rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+        batch_rays = torch.stack([rays_o, rays_d], 0)
+        target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
     for i in trange(start, N_iters):
         time0 = time.time()
+        t1.record()
 
-        # Sample random ray batch
-        if use_batching:
-            # Random over all images
-            batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
-            batch = torch.transpose(batch, 0, 1)
-            batch_rays, target_s = batch[:2], batch[2]
-
-            i_batch += N_rand
-            if i_batch >= rays_rgb.shape[0]:
-                print("Shuffle data after an epoch!")
-                rand_idx = np.random.permutation(rays_rgb.shape[0])
-                rays_rgb = rays_rgb[rand_idx]
-                i_batch = 0
-
-        else:
-            # Random from one image
-            img_i = np.random.choice(i_train)
-            target = images[img_i]
-            target = torch.Tensor(target).to(device)
-            pose = poses[img_i, :3,:4]
-
-            if N_rand is not None:
-                rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
-
-                if i < args.precrop_iters:
-                    dH = int(H//2 * args.precrop_frac)
-                    dW = int(W//2 * args.precrop_frac)
-                    coords = torch.stack(
-                        torch.meshgrid(
-                            torch.linspace(H//2 - dH, H//2 + dH - 1, 2*dH), 
-                            torch.linspace(W//2 - dW, W//2 + dW - 1, 2*dW)
-                        ), -1)
-                    if i == start:
-                        print(f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}")                
-                else:
-                    coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
-
-                coords = torch.reshape(coords, [-1,2])  # (H * W, 2)
-                select_inds = np.random.choice(coords.shape[0], size=[N_rand], replace=False)  # (N_rand,)
-                select_coords = coords[select_inds].long()  # (N_rand, 2)
-                rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
-                rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
-                batch_rays = torch.stack([rays_o, rays_d], 0)
-                target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
 
         #####  Core optimization loop  #####
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
@@ -777,6 +768,10 @@ def train():
 
         loss.backward()
         optimizer.step()
+
+        t2.record()
+        torch.cuda.synchronize(device=device)
+        print('Render path time:', t1.elapsed_time(t2))
 
         # NOTE: IMPORTANT!
         ###   update learning rate   ###

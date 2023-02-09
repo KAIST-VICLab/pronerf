@@ -6,12 +6,20 @@ import numpy as np
 import torch.utils.model_zoo as model_zoo
 import torchvision.models as models
 import torch.nn.init as init
+from kornia.losses import ssim_loss as dssim
 
 
 # Misc
 img2mse = lambda x, y : torch.mean((x - y) ** 2)
 mse2psnr = lambda x : -10. * torch.log10(x)
 to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
+
+def img2ssim(image_pred, image_gt, reduction="mean"):
+    """
+    image_pred and image_gt: (1, 3, H, W)
+    """
+    dssim_ = dssim(image_pred, image_gt, 3, reduction=reduction)  # dissimilarity in [0, 1]
+    return 1 - 2 * dssim_  # in [-1, 1]
 
 
 # Positional encoding (section 5.1)
@@ -366,6 +374,164 @@ class MinMaxRay_Net(nn.Module):
 
         return outputs
 
+class MinMaxRayAttn_Net(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_epi =3, ray_enc = 3,output_ch=3, skips=[4]):
+        """
+        """
+        super(MinMaxRayAttn_Net, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+
+        # input project
+        self.pts_linears = nn.Sequential(
+            nn.Linear(input_ch, W),
+            nn.ReLU()
+        )
+        self.feat_linears = nn.Sequential(
+            nn.Linear(input_ch_epi, W),
+            nn.ReLU()
+        )
+        self.rayenc_linears = nn.Sequential(
+            nn.Linear(ray_enc, W),
+            nn.ReLU()
+        )
+
+        # self attention
+        self.self_attn = nn.MultiheadAttention(W, 8, dropout=0.1)
+        self.dropout2 = nn.Dropout(0.1)
+        self.norm2 = nn.LayerNorm(W)
+
+        # ray_enc cross attn
+        self.self_attn1 = nn.MultiheadAttention(W, 8, dropout=0.1)
+        self.dropout1 = nn.Dropout(0.1)
+        self.norm1 = nn.LayerNorm(W)
+
+        # visual cross attention
+        self.cross_attn = nn.MultiheadAttention(W, 8, dropout=0.1)
+        self.dropout = nn.Dropout(0.1)
+        self.norm = nn.LayerNorm(W)
+
+
+        # ffn
+        self.linear1 = nn.Linear(W, 4*W)
+        self.activation = nn.ReLU()
+        self.dropout3 = nn.Dropout(0.1)
+        self.linear2 = nn.Linear(4*W, W)
+        self.dropout4 = nn.Dropout(0.1)
+        self.norm3 = nn.LayerNorm(W)
+
+        self.fc_output = nn.Linear(W, output_ch)
+
+    @staticmethod
+    def with_pos_embed(tensor, pos):
+        return tensor if pos is None else tensor + pos
+    
+    def forward_ffn(self, tgt):
+        tgt2 = self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout4(tgt2)
+        tgt = self.norm3(tgt)
+        return tgt
+
+    def forward(self, epi_pts, epi_colors, ray_enc):
+        epi_pts = self.pts_linears(epi_pts)
+        ray_enc = self.rayenc_linears(ray_enc)[None].repeat(epi_pts.shape[0],1,1)
+        epi_colors = self.feat_linears(epi_colors)
+        
+
+        # pts self attn
+        epi_pts_2 = self.self_attn(epi_pts, epi_pts, epi_pts)[0]
+        epi_pts = epi_pts + self.dropout2(epi_pts_2)
+        epi_pts = self.norm2(epi_pts)
+
+        # ray enc cross attn
+        epi_pts_2 = self.self_attn1(epi_pts, ray_enc, ray_enc)[0]
+        epi_pts = epi_pts + self.dropout1(epi_pts_2)
+        epi_pts = self.norm1(epi_pts)
+
+        # visual cross attn
+        epi_features = self.cross_attn(epi_pts, epi_colors, epi_colors)[0]
+        epi_features = epi_pts + self.dropout(epi_features)
+        epi_features = self.norm(epi_features)
+
+        epi_features = self.forward_ffn(epi_features)
+        outputs = self.fc_output(epi_features)
+        return outputs.permute(1,0,2).squeeze(-1)
+
+# class MinMaxRayAttn_Net(nn.Module):
+#     def __init__(self, D=8, W=256, input_ch=3, input_ch_epi =3,output_ch=3, skips=[4]):
+#         """
+#         """
+#         super(MinMaxRayAttn_Net, self).__init__()
+#         self.D = D
+#         self.W = W
+#         self.input_ch = input_ch
+
+#         # input project
+#         self.pts_linears = nn.Sequential(
+#             nn.Linear(input_ch, W),
+#             nn.ReLU()
+#         )
+#         self.feat_linears = nn.Sequential(
+#             nn.Linear(input_ch_epi, W),
+#             nn.ReLU()
+#         )
+#         self.rayenc_linears = nn.Sequential(
+#             nn.Linear(input_ch_epi, W),
+#             nn.ReLU()
+#         )
+
+#         # self attention
+#         self.self_attn = nn.MultiheadAttention(W, 8, dropout=0.1)
+#         self.dropout2 = nn.Dropout(0.1)
+#         self.norm2 = nn.LayerNorm(W)
+
+#         # visual cross attention
+#         self.cross_attn = nn.MultiheadAttention(W, 8, dropout=0.1)
+#         self.dropout = nn.Dropout(0.1)
+#         self.norm = nn.LayerNorm(W)
+
+
+#         # ffn
+#         self.linear1 = nn.Linear(W, 2*W)
+#         self.activation = nn.ReLU()
+#         self.dropout3 = nn.Dropout(0.1)
+#         self.linear2 = nn.Linear(2*W, W)
+#         self.dropout4 = nn.Dropout(0.1)
+#         self.norm3 = nn.LayerNorm(W)
+
+#         self.fc_output = nn.Linear(W, output_ch)
+
+#     @staticmethod
+#     def with_pos_embed(tensor, pos):
+#         return tensor if pos is None else tensor + pos
+    
+#     def forward_ffn(self, tgt):
+#         tgt2 = self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
+#         tgt = tgt + self.dropout4(tgt2)
+#         tgt = self.norm3(tgt)
+#         return tgt
+
+#     def forward(self, epi_pts, epi_colors):
+#         epi_pts = self.pts_linears(epi_pts)
+#         epi_colors = self.feat_linears(epi_colors)
+        
+
+#         # pts self attn
+#         epi_pts_2 = self.self_attn(epi_pts, epi_pts, epi_pts)[0]
+#         epi_pts = epi_pts + self.dropout2(epi_pts_2)
+#         epi_pts = self.norm2(epi_pts)
+
+#         # visual cross attn
+#         epi_features = self.cross_attn(epi_pts, epi_colors, epi_colors)[0]
+#         epi_features = epi_pts + self.dropout(epi_features)
+#         epi_features = self.norm(epi_features)
+
+#         epi_features = self.forward_ffn(epi_features)
+#         outputs = self.fc_output(epi_features)
+
+#         return outputs.squeeze(-1).transpose(0,1)
+
 
 class MinMaxRayS_Net(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, output_ch=3, skips=[4]):
@@ -382,17 +548,6 @@ class MinMaxRayS_Net(nn.Module):
                                           SineLayer(W + input_ch, W, omega_0=1.0) for i in range(D - 1)])
 
         self.fc_output = nn.Linear(W, output_ch, bias=False)
-        # self.fc_output = nn.Linear(W, output_ch)
-        # self.init_fc_output()
-
-    # def init_fc_output(self):
-    #     m = self.fc_output
-    #     m.weight.data.fill_(0.)
-    #     m.bias.data.fill_(-3)
-    #     # init.constant_(m.weight[:-3,:],0)
-    #     # if m.bias is not None:
-    #     #     init.constant_(m.bias[:-3], -3.)
-    #     # breakpoint()
 
     def forward(self, x):
         h = x
@@ -403,6 +558,64 @@ class MinMaxRayS_Net(nn.Module):
 
         outputs = self.fc_output(h)
 
+        return outputs
+
+class MinMaxRaySOrder_Net(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, N_samples=3, skips=[4]):
+        """
+        """
+        super(MinMaxRaySOrder_Net, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.skips = skips
+        self.near = 0.
+        self.far = 1.
+        self.N_samples = N_samples
+
+        self.fc_backbone = nn.ModuleList([SineLayer(input_ch, W, omega_0=2.0, is_first=True)] +
+                                         [SineLayer(W, W, omega_0=1.0) if i not in self.skips else
+                                          SineLayer(W + input_ch, W, omega_0=1.0) for i in range(D - 1)])
+
+        self.fc_output = nn.Linear(W, N_samples*2 + 3, bias=False)
+        self.pos_output = nn.Linear(W, N_samples, bias=False)
+
+    # def forward(self, x):
+    #     h = x
+    #     for i, l in enumerate(self.fc_backbone):
+    #         h = self.fc_backbone[i](h)
+    #         if i in self.skips:
+    #             h = torch.cat([x, h], -1)
+
+    #     dense_outputs = self.fc_output(h)
+    #     pos_outputs = self.pos_output(h)
+    #     pos_lists = []
+    #     for i in range(self.N_samples):
+    #         if i == 0:
+    #             pos_lists.append((self.far - self.near) * torch.sigmoid(pos_outputs[:, i,None]) + self.near)
+    #         else:
+    #             pos_lists.append(torch.sigmoid(pos_outputs[:, i,None]) * (self.far - pos_lists[i-1]) +  pos_lists[i-1])
+    #     pos_lists = torch.cat(pos_lists, dim =1)
+    #     outputs = torch.cat([pos_lists, dense_outputs], dim =1)
+    #     return outputs
+
+    def forward(self, x):
+        h = x
+        for i, l in enumerate(self.fc_backbone):
+            h = self.fc_backbone[i](h)
+            if i in self.skips:
+                h = torch.cat([x, h], -1)
+
+        dense_outputs = self.fc_output(h)
+        pos_outputs = self.pos_output(h)
+        pos_lists = []
+        for i in range(self.N_samples):
+            if i == 0:
+                pos_lists.append((self.far - self.near) * (1-torch.sigmoid(pos_outputs[:, i,None])) + self.near)
+            else:
+                pos_lists.append((1-torch.sigmoid(pos_outputs[:, i,None])) * (self.far - pos_lists[i-1]) +  pos_lists[i-1])
+        pos_lists = torch.cat(pos_lists, dim =1)
+        outputs = torch.cat([pos_lists, dense_outputs], dim =1)
         return outputs
 
 

@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '4'
+gpu_n = '6'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -87,6 +87,8 @@ def config_parser():
                         help='do not reload weights from saved ckpt')
     parser.add_argument("--ft_path", type=str, default=None,
                         help='specific weights npy file to reload for coarse network')
+    parser.add_argument("--num_neighbor", type=int, default=4,
+                    help='num neighbor frames')
 
     # rendering options
     parser.add_argument("--N_samples", type=int, default=64,
@@ -316,8 +318,8 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         poses_train = render_kwargs['poses_np']
         dists = np.sum(np.square(c2w.cpu().numpy()[:3,3] - poses_train[:,:3,3]), -1)
         
-        nearest_pose = np.argsort(dists)[1:5] # 4 nereast neighbor
-        rays_nearest_id = nearest_pose[None, None,:].repeat(H, axis=0).repeat(W, axis=1).reshape(-1,4)
+        nearest_pose = np.argsort(dists)[0:1+render_kwargs['num_neighbor']]
+        rays_nearest_id = nearest_pose[None, None,:].repeat(H, axis=0).repeat(W, axis=1).reshape(-1,render_kwargs['num_neighbor'] + 1)
         rays_nearest_id = torch.Tensor(rays_nearest_id).to(device)
         render_kwargs['batch_rays_nearest_id'] = rays_nearest_id
 
@@ -404,15 +406,21 @@ def create_nerf(args):
 
     model_mmray = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                       input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
-                                      (3+3*4) * args.N_point_ray_enc,
-                                      output_ch=3*args.N_samples + 3, skips=args.mmnetskips)
+                                      (3) * args.N_point_ray_enc,
+                                      output_ch=3*args.N_samples+3, skips=args.mmnetskips)
     grad_vars.append({'params': model_mmray.parameters(),
                      'weight_decay': args.weight_decay, 'lr': args.lrate})
     
-    # model_refine = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
-    #                               input_ch= (3 + 3) * args.N_samples,
-    #                               output_ch=3*args.N_samples + 3, skips=args.mmnetskips).to(device)
-    # grad_vars.append({'params': model_refine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
+    model_refine = MinMaxRayAttn_Net(D=args.mmnetdepth, W=args.mmnetwidth,
+                                    input_ch= 3,
+                                    input_ch_epi = 3*args.num_neighbor,
+                                    ray_enc=3*args.N_point_ray_enc,
+                                    output_ch=1, skips=args.mmnetskips)
+    # model_refine = MinMaxRayAttn_Net(D=args.mmnetdepth, W=args.mmnetwidth,
+    #                                 input_ch= 3,
+    #                                 input_ch_epi = 3*args.num_neighbor,
+    #                                 output_ch=1, skips=args.mmnetskips)
+    grad_vars.append({'params': model_refine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     # Create optimizer
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
@@ -440,7 +448,7 @@ def create_nerf(args):
         # Load model
         # model.load_state_dict(ckpt['network_fn_state_dict'])
         model_mmray.load_state_dict(ckpt['mmr_network_fn_state_dict'])
-        # model_refine.load_state_dict(ckpt['refine_net_state_dict'])
+        model_refine.load_state_dict(ckpt['refine_net_state_dict'])
         # if model_fine is not None:
         #     model_fine.load_state_dict(ckpt['network_fine_state_dict'])
 
@@ -457,11 +465,12 @@ def create_nerf(args):
         'white_bkgd': args.white_bkgd,
         'raw_noise_std': args.raw_noise_std,
         'min_max_ray_net': model_mmray,
-        'refine_net': None,
+        'refine_net': model_refine,
         'N_point_ray_enc': args.N_point_ray_enc,
         'embed_fn': embed_fn,
         'embeddirs_fn': embeddirs_fn,
-        'randomize': True
+        'randomize': True,
+        'num_neighbor': args.num_neighbor
     }
 
     # NDC only good for LLFF-style forward facing data
@@ -541,7 +550,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
     if mm_density_add is not None:
-        alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
+        alpha = raw2alpha(raw[...,3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
         if iter > 200000:
             alpha = alpha*torch.sigmoid(mm_density_mul)
     else:
@@ -586,22 +595,56 @@ def render_rays(ray_batch, or_ray_batch,
     bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
     near, far = bounds[...,0], bounds[...,1] # [-1,1]
 
+    with torch.no_grad():
+        pts, _ = compute_query_points_from_rays(
+            rays_o, rays_d, 0., 1., N_point_ray_enc, randomize=False)  # ! this is ndc space
+    
+    # 1. mm take point encoding and predict N samples points
+    pts = pts.view(-1, N_point_ray_enc * 3)
+    min_max_rays = min_max_ray_net(pts)
+    mm_rgb = torch.sigmoid(min_max_rays[:, 3*N_samples:])
+    mm_density_add = min_max_rays[:, N_samples:2*N_samples]
+    mm_density_mul = min_max_rays[:, 2*N_samples:3*N_samples]
+
+    depth_values = torch.sigmoid(min_max_rays[:, :N_samples]) * (far - near) + near  # B, Nsamples, H, W
+    sort_out = torch.sort(depth_values, dim=-1)
+    depth_values = sort_out[0]  # ! depth values are sorted, ndc space
+    mm_density_add = torch.gather(mm_density_add, dim =1, index = sort_out[1])
+    mm_density_mul = torch.gather(mm_density_mul, dim =1, index = sort_out[1])
+
+    depth_values_3d = 1/(1-depth_values)  #! convert ndc zval to 3d zval
+
     or_rays_o, or_rays_d = or_ray_batch[:, 0:3], or_ray_batch[:, 3:6]  # [N_rays, 3] each
     or_bounds = torch.reshape(or_ray_batch[..., 6:8], [-1, 1, 2])
     or_near, or_far = or_bounds[0, 0, 0], or_bounds[0, 0, 1]  # [-1,1]
 
     with torch.no_grad():
-        _, epi_z_vals = compute_query_points_from_rays(or_rays_o, or_rays_d, or_near, or_far, N_point_ray_enc, randomize=False) # ! this 3d space
-        # start to warp epi line
-        num_pts = N_point_ray_enc
-        num_neighbor = 4
+        num_pts = N_samples
+        num_neighbor = kwargs['num_neighbor']
         k_ref = kwargs['images'].shape[0]
-        ref_rgb = kwargs['images']
+        ref_rgbs = kwargs['images']
         ref_K = kwargs['ref_K']
-        ref_rgb = (ref_rgb.permute(0, 3, 1, 2))
+        ref_poses = kwargs['poses']
+
+        current_id = kwargs['batch_rays_nearest_id'][:,0].long()
+        target_pose = ref_poses[current_id]
+
+        rel_cam_dist = torch.sum((target_pose[:,None,:, 3] - ref_poses[:, :, 3]) ** 2, 2) ** (1 / 2)
+        _, rel_cam_idx = torch.sort(rel_cam_dist.detach(), dim=1)
+
+        if randomize:
+            ref_nos = rel_cam_idx[:,1:]
+            # Random but keep order, ! remove the first pose
+            order_idx = torch.from_numpy(np.array(sorted(random.sample(range(ref_nos.shape[1]), num_neighbor)))).to(device)
+            ref_nos = torch.gather(ref_nos, dim =1, index = order_idx[None].repeat(N_rays,1))
+        else:
+            # Nearest, testing do not remove first pose
+            ref_nos = rel_cam_idx[:, 0:num_neighbor]
+
+    
+        ref_rgb = (ref_rgbs.permute(0, 3, 1, 2))
         ref_rgb = torch.repeat_interleave(ref_rgb, repeats=num_pts, dim=0)
-        ref_pose = kwargs['poses']
-        ref_pose = torch.repeat_interleave(ref_pose, repeats=num_pts, dim=0)
+        ref_pose = torch.repeat_interleave(ref_poses, repeats=num_pts, dim=0)
 
         ro1, rd1 = torch.transpose(or_rays_o, 0, 1).unsqueeze(0), torch.transpose(or_rays_d, 0, 1).unsqueeze(0)  # 1, 3, H*W
         ro1, rd1 = ro1.repeat(num_pts * k_ref, 1, 1), rd1.repeat(num_pts * k_ref, 1, 1)
@@ -611,45 +654,39 @@ def render_rays(ray_batch, or_ray_batch,
         # ! warp H and W will be 1, N_rays
         warp_H = 1
         warp_W = N_rays
-        depths = epi_z_vals[:,None,None,:].repeat(k_ref,warp_H,warp_W,1) # k_ref, H, W, N_point_ray_enc
+        depths = depth_values_3d[None,None,:,:].repeat(k_ref,1,1,1) # k_ref, H, W, N_point_ray_enc
         depths = (depths.permute(0, 3, 1, 2)).reshape(-1, warp_H, warp_W)  # k_ref * N_point_ray_enc, H, W
 
         warps = inverse_warp.inverse_warp_rod1_rt2_coords(ref_rgb, depths, ro1, rd1, ref_pose, ref_K, inv_K, padding_mode='zeros')
-        invalid_warp = (torch.sum(warps.detach(), 1, True) == 0).type_as(warps)
-        warps = warps * (1 - invalid_warp) - invalid_warp # make invalid regions -1 # ! this full datatsets warp --> we need to filter val imgs and current train imgs
-        warps_flat = warps.view(1, k_ref, num_pts, 3, warp_H, warp_W)
-        rays_valid_id = kwargs['batch_rays_nearest_id'].transpose(0, 1)[None,:,None,None,None].repeat(1, 1, num_pts,3,1,1) 
-        # filter
+        warps_flat = warps.clone().view(1, k_ref, num_pts, 3, warp_H, warp_W)
+        rays_valid_id = ref_nos.transpose(0, 1)[None,:,None,None,None].repeat(1, 1, num_pts,3,1,1) 
         valid_warps_flat = torch.gather(warps_flat, dim=1, index = rays_valid_id.long()) # 1, validid, N samples, 3, 1, N rays
 
-        # take mean warp
-        epi_features = (valid_warps_flat.view(num_neighbor*num_pts, 3, warp_H*warp_W).permute(2,0,1)).reshape(-1, 3*num_pts*num_neighbor) # N rays, 3*num_pts
+        valid_warp = (torch.sum(valid_warps_flat.detach(), 3, True) > 0).type_as(warps).repeat(1, 1, 1, 3, 1, 1)
+        mean_sample_warp = torch.sum(valid_warp * valid_warps_flat.detach(), 1, True) / (torch.sum(valid_warp, 1, True) + 1e-6)
+        valid_warps_flat = valid_warps_flat * valid_warp + mean_sample_warp * (1 - valid_warp)
+        epi_features = (valid_warps_flat.view(num_pts, num_neighbor, 3, warp_H*warp_W).permute(0,3,1,2)).reshape(num_pts,N_rays, 3*num_neighbor) # N rays, 3*num_pts
     
-    # pts = pts.view(-1, num_pts * 3)
 
-    z_vals = -1 / epi_z_vals + 1 #! convert 3d zval to ndc zval
-    epi_pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
-    epi_pts = epi_pts.view(-1, num_pts * 3)
-    
-    refine_input = torch.cat([epi_pts, epi_features], dim =1)
-    min_max_rays = min_max_ray_net(refine_input)
+    epi_pts = rays_o[..., None, :] + rays_d[..., None, :] * depth_values[..., :, None]
+    epi_pts = epi_pts.permute(1,0,2)
+    refine_depth_values = torch.sigmoid(refine_net(epi_pts, epi_features, pts))
 
-    mm_rgb = torch.sigmoid(min_max_rays[:, 3*N_samples:])
-    mm_density_add = min_max_rays[:, N_samples:2*N_samples]
-    mm_density_mul = min_max_rays[:, 2*N_samples:3*N_samples]
+    # refine_depth_values = refine_depth_values * (far - near) + near  # B, Nsamples, H, W
+    # sort_out = torch.sort(refine_depth_values, dim=-1)
+    # refine_depth_values = sort_out[0]  # ! depth values are sorted, ndc space
 
-    depth_values = torch.sigmoid(min_max_rays[:, :N_samples]) * (far - near) + near  # B, Nsamples, H, W
-    sort_out = torch.sort(depth_values, dim=-1)
-    depth_values = sort_out[0]  # ! depth values are sorted
-    mm_density_add = torch.gather(mm_density_add, dim =1, index = sort_out[1])
-    mm_density_mul = torch.gather(mm_density_mul, dim =1, index = sort_out[1])
+    mids = .5 * (depth_values[...,1:] + depth_values[...,:-1])
+    upper = torch.cat([mids, depth_values[...,-1:]], -1) # upper cat far
+    lower = torch.cat([depth_values[...,:1], mids], -1) # lower cat near
+    refine_depth_values = lower + (upper - lower) * refine_depth_values
 
     query_points_nerf = rays_o[..., None, :] + rays_d[..., None,
-                                                    :] * depth_values[..., :, None]  # ! this is ndc space
+                                                    :] * refine_depth_values[..., :, None]  # ! this is ndc space
     
     raw = network_query_fn(query_points_nerf, viewdirs, network_fine)
     iter = kwargs.get('iter',1e6)
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, depth_values, rays_d, raw_noise_std, white_bkgd, pytest=pytest, mm_density_add=mm_density_add, mm_density_mul=mm_density_mul, iter=iter)
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, refine_depth_values, rays_d, raw_noise_std, white_bkgd, pytest=pytest, mm_density_add=mm_density_add, mm_density_mul=mm_density_mul, iter=iter)
     ret = {'rgb_map0': mm_rgb, 'rgb_map1': rgb_map,'depth_map': depth_map, 'sigma': raw[..., 3]}
     return ret
 
@@ -820,10 +857,10 @@ def train():
         rays_nearest_id = []
         for pose_id in range(poses_train.shape[0]):
             dists = np.sum(np.square(poses_train[pose_id][:3,3] - poses_train[:,:3,3]), -1)
-            nearest_pose = np.argsort(dists)[1:5] # 4 nereast neighbor
+            nearest_pose = np.argsort(dists)[0:1+args.num_neighbor] # 4 nereast neighbor
             rays_nearest_id.append(nearest_pose)
         rays_nearest_id = np.stack(rays_nearest_id, axis = 0)
-        rays_nearest_id = rays_nearest_id[:, None, None,:].repeat(H, axis=1).repeat(W, axis=2).reshape(-1,4)
+        rays_nearest_id = rays_nearest_id[:, None, None,:].repeat(H, axis=1).repeat(W, axis=2).reshape(-1,args.num_neighbor + 1)
             
 
         print('shuffle rays')
@@ -843,7 +880,7 @@ def train():
         rays_nearest_id = torch.Tensor(rays_nearest_id).to(device)
 
 
-    N_iters = 2000000 + 1
+    N_iters = 300000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -874,21 +911,6 @@ def train():
         batch_rays, target_s, target_depth = batch[:2], batch[2], batch[3]
         batch_rays_nearest_id = rays_nearest_id[i_batch:i_batch+N_rand]
 
-        # # compute valid id for warp
-        # batch_total_id = (np.array(i_train))[
-        #     None].repeat(batch.shape[1], 0)
-        # batch_current_id = batch_img_id.cpu().numpy()
-        # batch_valid_id = np.zeros(
-        #     (batch.shape[1], batch_total_id.shape[1] - 1))
-        # for ray_id in range(batch.shape[1]):
-        #     batch_valid_id[ray_id] = np.setdiff1d(
-        #         batch_total_id[ray_id], batch_current_id[ray_id])
-
-        # # update image id of each ray
-        # render_kwargs_train['rays_img_id'] = torch.from_numpy(
-        #     batch_valid_id).to(device)
-
-
         i_batch += N_rand
         if i_batch >= rays_rgb.shape[0]:
             rand_idx = np.random.permutation(rays_rgb.shape[0])
@@ -911,7 +933,7 @@ def train():
 
         sigma_loss = -(extras['sigma']).mean() # sigma loss for density
 
-        loss = img_loss + rgb0_loss + depth_loss + (1e-4)*sigma_loss
+        loss = img_loss + rgb0_loss + depth_loss + (1e-5)*sigma_loss
 
         psnr = mse2psnr(img_loss)
 
@@ -941,7 +963,7 @@ def train():
                     'global_step': global_step,
                     'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
                     'mmr_network_fn_state_dict': render_kwargs_train['min_max_ray_net'].state_dict(),
-                    # 'refine_net_state_dict': render_kwargs_train['refine_net'].state_dict(),
+                    'refine_net_state_dict': render_kwargs_train['refine_net'].state_dict(),
                     'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                 }, path)
@@ -950,7 +972,7 @@ def train():
                 torch.save({
                     'global_step': global_step,
                     'mmr_network_fn_state_dict': render_kwargs_train['min_max_ray_net'].state_dict(),
-                    # 'refine_net_state_dict': render_kwargs_train['refine_net'].state_dict(),
+                    'refine_net_state_dict': render_kwargs_train['refine_net'].state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                 }, path)
                 print('Saved checkpoints at', path)

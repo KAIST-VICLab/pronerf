@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm, trange
+import lpips
 
 import matplotlib.pyplot as plt
 
@@ -150,6 +151,11 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     disps = []
     depths = []
     psnrs = []
+    ssims = []
+    lpips_res = []
+
+    lpips_vgg = lpips.LPIPS(net="vgg").cuda()
+    lpips_vgg = lpips_vgg.eval()
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
@@ -164,10 +170,20 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
         
         if gt_imgs is not None and render_factor==0:
-            # p = mse2psnr(img2mse(rgb, gt_imgs[i]))
-            # psnrs.append(p)
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
             psnrs.append(p)
+
+            # ssims
+            ssim = img2ssim(rgb.permute(2, 0, 1)[None], torch.from_numpy(
+                gt_imgs[i]).permute(2, 0, 1)[None].cuda())
+            ssims.append(ssim.cpu().numpy())
+
+            # lpips
+            scaled_gt = torch.from_numpy(gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
+            scaled_pred = rgb.permute(2, 0, 1)[None] * 2.0 - 1.0
+            lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
+            lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
+
 
         if savedir is not None:
             # rgb8 = to8b(rgbs[-1])
@@ -246,8 +262,8 @@ def create_nerf(args):
         print('Reloading from', ckpt_path)
         ckpt = torch.load(ckpt_path)
 
-        start = ckpt['global_step']
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        # start = ckpt['global_step']
+        # optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
         # Load model
         model.load_state_dict(ckpt['network_fn_state_dict'])
@@ -641,7 +657,7 @@ def train():
         ])
 
     if args.render_test:
-        render_poses = np.array(poses[i_train])
+        render_poses = np.array(poses[i_test])
 
     # Create log dir and copy the config file
     basedir = args.basedir
@@ -678,7 +694,7 @@ def train():
             if args.render_test:
                 # render_test switches to test poses
                 # images = torch.Tensor(images[i_test]).to(device)
-                images = images[i_train]
+                images = images[i_test]
             else:
                 # Default is smoother render_poses path
                 images = None

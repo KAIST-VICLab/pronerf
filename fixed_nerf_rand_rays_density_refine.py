@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '4'
+gpu_n = '6'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -515,7 +515,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
     if mm_density_add is not None:
-        alpha = raw2alpha(raw[...,3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
+        alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
         if True:
             alpha = alpha*torch.sigmoid(mm_density_mul)
     else:
@@ -758,7 +758,7 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
-    N_iters = 200000 + 1
+    N_iters = 100000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -811,7 +811,7 @@ def train():
         # neg_log_var = -torch.log(positive_z_vals_var + 1e-6)
 
         # loss = img_loss + rgb0_loss + depth_loss + (1e-4)*sigma_loss
-        loss = img_loss + rgb0_loss + depth_loss
+        loss = img_loss
         psnr = mse2psnr(img_loss)
 
         loss.backward()

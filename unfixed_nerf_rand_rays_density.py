@@ -374,7 +374,9 @@ def create_nerf(args):
     # fine_weight = np.load('logs/fern_example/model_fine_200000.npy', allow_pickle=True)
     # model_fine.load_weights_from_keras(fine_weight)
     model_fine.to(device)
-    model_fine.load_state_dict(pretrain_ckpt['network_fine_state_dict'])
+    # model_fine.load_state_dict(pretrain_ckpt['network_fine_state_dict'])
+    grad_vars.append({'params': model_fine.parameters(),
+                    'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
                                                                 embed_fn=embed_fn,
@@ -385,6 +387,11 @@ def create_nerf(args):
                                       input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
                                       3 * args.N_point_ray_enc,
                                       output_ch=3*args.N_samples + 3, skips=args.mmnetskips)
+    
+    # model_mmray = MinMaxRaySOrder_Net(D=args.mmnetdepth, W=args.mmnetwidth,
+    #                                 input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
+    #                                 3 * args.N_point_ray_enc,
+    #                                 N_samples=args.N_samples, skips=args.mmnetskips)
     grad_vars.append({'params': model_mmray.parameters(),
                      'weight_decay': args.weight_decay, 'lr': args.lrate})
 
@@ -517,7 +524,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         # if iter < 150000:
         #     alpha = raw2alpha(raw[...,3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
         # else:
-        alpha = raw2alpha(raw[...,3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
+        alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
         if iter > 200000:
             alpha = alpha*torch.sigmoid(mm_density_mul)
     else:
@@ -573,7 +580,9 @@ def render_rays(ray_batch,
     mm_density_add = min_max_rays[:, N_samples:2*N_samples]
     mm_density_mul = min_max_rays[:, 2*N_samples:3*N_samples]
 
-    # 3. Reparam trick
+    # 3.
+    # depth_values = (min_max_rays[:, :N_samples]) # B, Nsamples, H, W
+
     depth_values = torch.sigmoid(min_max_rays[:, :N_samples]) * (far - near) + near  # B, Nsamples, H, W
     sort_out = torch.sort(depth_values, dim=-1)
     depth_values = sort_out[0]  # ! depth values are sorted
@@ -803,7 +812,7 @@ def train():
         neg_sigma = -(extras['sigma'])
         # weighted_neg_sigma = torch.exp(weighted_distance)*neg_sigma
         # # ! only multiply with valid sigma
-        sigma_loss = neg_sigma.mean() # sigma loss for density
+        sigma_loss = (neg_sigma).mean() # sigma loss for density
 
         # # maximize the variance of z_vals where sigma > 0
         # z_vals = extras['z_vals']
@@ -817,7 +826,7 @@ def train():
         # # maximiz = minimize -log
         # neg_log_var = (-torch.log(positive_z_vals_var + 1e-6)).mean()
 
-        loss = img_loss + rgb0_loss + depth_loss + (1e-4)*sigma_loss
+        loss = img_loss + rgb0_loss + depth_loss
 
         psnr = mse2psnr(img_loss)
 
