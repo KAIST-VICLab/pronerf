@@ -21,6 +21,26 @@ def img2ssim(image_pred, image_gt, reduction="mean"):
     dssim_ = dssim(image_pred, image_gt, 3, reduction=reduction)  # dissimilarity in [0, 1]
     return 1 - 2 * dssim_  # in [-1, 1]
 
+class Pluecker(nn.Module):
+    def __init__(
+        self,
+    ):
+
+        super().__init__()
+
+        self.in_channels = 6
+        self.out_channels = 6
+
+        self.direction_multiplier = 1.0
+        self.moment_multiplier =  1.0
+
+        self.origin = torch.tensor([0.0, 0.0, 0.0], device='cuda')
+
+    def forward(self, rays_o, rays_d):
+        rays_d = torch.nn.functional.normalize(rays_d, p=2.0, dim=-1)
+
+        m = torch.cross(rays_o, rays_d, dim=-1)
+        return torch.cat([rays_d * self.direction_multiplier, m * self.moment_multiplier], dim=-1)
 
 # Positional encoding (section 5.1)
 class Embedder:
@@ -373,6 +393,54 @@ class MinMaxRay_Net(nn.Module):
         outputs = self.fc_output(h)
 
         return outputs
+
+class MinMaxRay_NetEpiNPE0(nn.Module):
+    def __init__(self, D=8, W=256, input_points=4, input_ch=3, input_epi=3, output_ch=3, skips=[4], npe_ch=16):
+        """
+        """
+        super(MinMaxRay_NetEpiNPE0, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.input_epi = input_epi
+        self.skips = skips
+        self.input_points = input_points
+
+        print(f'Input ch: {input_ch}, Input Epi: {input_epi}')
+
+        self.fc_backbone = nn.ModuleList([nn.Linear(input_points * npe_ch, W)] +
+                                         [nn.Linear(W, W) if i not in self.skips else
+                                          nn.Linear(W + input_points * npe_ch, W) for i in range(D - 1)])
+
+        self.npe = nn.Sequential(
+            nn.Linear(input_ch + input_epi, npe_ch * 4), nn.ELU(True), nn.Linear(npe_ch * 4, npe_ch), nn.ELU(True)
+        )
+
+        self.fc_output = nn.Linear(W, output_ch)
+
+    def forward(self, x, epi=None, chunk=1024*64):
+        n_rays = x.shape[0]
+        if epi is not None:
+            x = torch.cat((x.view(-1, self.input_ch),  epi.reshape(-1, self.input_epi)), 1)
+        else:
+            x = x.view(-1, self.input_ch)
+
+        if x.shape[0] > chunk:
+            x_npe = torch.cat([self.npe(x[i:i + chunk]) for i in range(0, x.shape[0], chunk)], 0)
+        else:
+            x_npe = self.npe(x)
+        x = x_npe.view(n_rays, -1)
+
+        h = x
+        for i, l in enumerate(self.fc_backbone):
+            h = self.fc_backbone[i](h)
+            h = F.elu(h)
+            if i in self.skips:
+                h = torch.cat([x, h], -1)
+
+        outputs1 = self.fc_output(h)
+
+        return outputs1
 
 class MinMaxRayAttn_Net(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, input_ch_epi =3, ray_enc = 3,output_ch=3, skips=[4]):

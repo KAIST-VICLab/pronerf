@@ -1,4 +1,4 @@
-expname = fixed_nerf_depthsup_usebatch_depthsup_8samples_density_add2mul_200k_epires2_4nn_nonoise
+expname = fixed_nerf_depthsup_usebatch_depthsup_12samples_density_add2mul_200k_epires4_episampler_plucker
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
 
@@ -7,7 +7,7 @@ llffhold = 8
 k_ref = 1
 
 N_rand = 4096
-N_samples = 8
+N_samples = 12
 N_importance = 0
 
 use_viewdirs = True
@@ -17,9 +17,9 @@ lrate = 5e-4
 a_p = 0.000
 a_mmrgb = 1.0
 a_mmdisp = 1.0
-mmnetdepth = 8
-mmnetwidth = 128
-mmnetskips = [10000]
+mmnetdepth = 6
+mmnetwidth = 256
+mmnetskips = [1000]
 N_point_ray_enc = 32
 mm_emb = False
 precrop_iters = 0

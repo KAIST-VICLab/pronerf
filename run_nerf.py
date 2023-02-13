@@ -186,13 +186,13 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
 
         if savedir is not None:
-            # rgb8 = to8b(rgbs[-1])
-            # filename = os.path.join(savedir, '{:03d}.png'.format(i))
-            # imageio.imwrite(filename, rgb8)
-
-            rgb8 = to8b(depths[-1]/np.max(depths[-1]))
+            rgb8 = to8b(rgbs[-1])
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
+
+            # rgb8 = to8b(depths[-1]/np.max(depths[-1]))
+            # filename = os.path.join(savedir, '{:03d}.png'.format(i))
+            # imageio.imwrite(filename, rgb8)
               
     # if len(psnrs) > 0:
     #     mean_psnr = 0
@@ -430,7 +430,7 @@ def render_rays(ray_batch,
         z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
         z_samples = z_samples.detach()
 
-        z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
+        z_vals, _ = torch.sort(torch.cat([z_samples], -1), -1)
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
 
         run_fn = network_fn if network_fine is None else network_fine

@@ -2,6 +2,9 @@ from __future__ import division
 import torch
 from torch.autograd import Variable
 import torch.nn.functional as F
+import tensorrt
+import torch_tensorrt
+torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
 pixel_coords = None
 
@@ -490,3 +493,99 @@ def inverse_warp_rod1_rt2_coords(img, depth, ro1, rd1, c2w2, intrinsics, intrins
         projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode=padding_mode,
                                                     align_corners=True) 
     return projected_img
+
+# @torch.jit.script
+# def jit_inverse_warp_rod1_rt2_coords(img, depth, ro1, rd1, c2w2, intrinsics):
+#     B, H, W = depth.shape
+#     _, C, Hfull, Wfull = img.shape
+
+#     R2 = c2w2[:, :, 0:3]
+#     t2 = c2w2[:, :, 3, None]
+#     R2_ = torch.transpose(R2, 2, 1)
+#     t2_ = -torch.bmm(R2_, t2)
+
+#     # 1. Lift directly into 3D world coordinates [B, 3, H*W]
+#     w = ro1 + rd1 * depth.view(B, 1, -1)
+
+#     # 3. Get camera coordinates in c2: c2 = R2'w + (-R2't2)
+#     c2 = torch.bmm(R2_, w) + t2_
+
+#     # 4. Get pixel coordinates in c2: p2 = Kc2 / c2[z]
+#     z = torch.abs(c2[:, 2, None, :])
+#     c2_ = c2 / z
+#     c2_[:, 2, :] = 1
+#     c2_[:, 1, :] *= -1
+#     p2 = torch.bmm(intrinsics, c2_)
+
+#     X = p2[:, 0]
+#     Y = p2[:, 1]
+#     X_norm = 2 * X / (Wfull - 1) - 1  # Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1) [B, H*W]
+#     Y_norm = 2 * Y / (Hfull - 1) - 1  # Idem [B, H*W]
+
+#     X_mask = ((X_norm > 1) + (X_norm < -1)).detach()
+#     X_norm[X_mask] = 2  # make sure that no point in warped image is a combinaison of im and gray
+#     Y_mask = ((Y_norm > 1) + (Y_norm < -1)).detach()
+#     Y_norm[Y_mask] = 2
+
+#     pixel_coords = torch.stack([X_norm, Y_norm], dim=2)  # [B, H*W, 2]
+#     src_pixel_coords = pixel_coords.view(B, H, W, 2)
+
+#     projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode='zeros', align_corners=True) 
+#     return projected_img
+
+# class WarpModule(torch.nn.Module):
+#     def __init__(self):
+#         super(WarpModule, self).__init__()
+
+
+#     def forward(self, img, depth,
+#                     ro1, rd1,
+#                     c2w2, intrinsics):
+#         B, H, W = depth.shape
+#         _, C, Hfull, Wfull = img.shape
+
+#         R2 = c2w2[:, :, 0:3]
+#         t2 = c2w2[:, :, 3, None]
+#         R2_ = torch.transpose(R2, 2, 1)
+#         t2_ = -torch.bmm(R2_, t2)
+
+#         # 1. Lift directly into 3D world coordinates [B, 3, H*W]
+#         w = ro1 + rd1 * depth.view(B, 1, -1)
+
+#         # 3. Get camera coordinates in c2: c2 = R2'w + (-R2't2)
+#         c2 = torch.bmm(R2_, w) + t2_
+
+#         # 4. Get pixel coordinates in c2: p2 = Kc2 / c2[z]
+#         z = torch.abs(c2[:, 2, None, :])
+#         c2_ = c2 / z
+#         c2_[:, 2, :] = 1
+#         c2_[:, 1, :] *= -1
+#         p2 = torch.bmm(intrinsics, c2_)
+
+#         X = p2[:, 0]
+#         Y = p2[:, 1]
+#         X_norm = 2 * X / (Wfull - 1) - 1  # Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1) [B, H*W]
+#         Y_norm = 2 * Y / (Hfull - 1) - 1  # Idem [B, H*W]
+
+#         X_mask = ((X_norm > 1) + (X_norm < -1)).detach()
+#         X_norm[X_mask] = 2  # make sure that no point in warped image is a combinaison of im and gray
+#         Y_mask = ((Y_norm > 1) + (Y_norm < -1)).detach()
+#         Y_norm[Y_mask] = 2
+
+#         pixel_coords = torch.stack([X_norm, Y_norm], dim=2)  # [B, H*W, 2]
+#         src_pixel_coords = pixel_coords.view(B, H, W, 2)
+
+#         projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode='zeros', align_corners=True) 
+#         return projected_img
+
+# scripted_warp = torch.jit.script(WarpModule())
+# trt_warp = torch_tensorrt.compile(scripted_warp, 
+#     inputs= [torch_tensorrt.Input((1, 3, 756, 1008)), # img, depth, ro1, rd1, c2w2, intrinsics
+#             torch_tensorrt.Input((1, 1, 762048)),
+#             torch_tensorrt.Input((1, 3, 762048)),
+#             torch_tensorrt.Input((1, 3, 762048)),
+#             torch_tensorrt.Input((1, 3, 4)),
+#             torch_tensorrt.Input((1, 3, 3))
+#         ],
+#     enabled_precisions= { torch_tensorrt.dtype.half} # Run with FP16
+# )
