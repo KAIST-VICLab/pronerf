@@ -791,28 +791,9 @@ def train():
         optimizer.zero_grad()
         img_loss = img2mse(rgb1, target_s)
         rgb0_loss = img2mse(rgb0, target_s)
-        depth_loss = img2mse(depth_map, target_depth[:,0])
 
-        # density loss
-        # density_loss = img2mse(extras['mm_density'], extras['sigma'].detach())
-
-        sigma_loss = -(extras['sigma']).mean() # sigma loss for density
-
-        # # maximize the variance of z_vals where sigma > 0
-        # z_vals = extras['z_vals']
-        # sigma = extras['sigma']
-        # z_vals_index = torch.ones_like(z_vals)
-        # z_vals_index[sigma < 0] = 0 # sigma < 0 has index 0, sigma > 0 has index 1
-
-        # mean_z_vals = torch_scatter.scatter_mean(z_vals, z_vals_index.long(), dim =-1)
-        # mean_z_vals_square = torch_scatter.scatter_mean(z_vals**2, z_vals_index.long(), dim =-1)
-        # positive_z_vals_var = mean_z_vals_square[:,1] - (mean_z_vals[:,1])**2
-        # # maximiz = minimize -log
-        # neg_log_var = -torch.log(positive_z_vals_var + 1e-6)
-
-        # loss = img_loss + rgb0_loss + depth_loss + (1e-4)*sigma_loss
         loss = img_loss
-        psnr = mse2psnr(img_loss)
+        psnr = mse2psnr(img_loss) + rgb0_loss
 
         loss.backward()
         optimizer.step()

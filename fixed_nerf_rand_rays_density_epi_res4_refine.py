@@ -14,7 +14,6 @@ import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_scatter
 from tqdm import tqdm, trange
 import inverse_warp
 import lpips
@@ -329,7 +328,6 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
 
         rgb0, rgb1, depth_map, extras = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
-
         rgbs0.append(rgb0.cpu().numpy())
         rgbs1.append(rgb1.cpu().numpy())
         depths.append(depth_map.cpu().numpy())

@@ -514,9 +514,6 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
     if mm_density_add is not None:
-        # if iter < 150000:
-        #     alpha = raw2alpha(raw[...,3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
-        # else:
         alpha = raw2alpha(raw[...,3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
         if iter > 200000:
             alpha = alpha*torch.sigmoid(mm_density_mul)
@@ -817,7 +814,7 @@ def train():
         # # maximiz = minimize -log
         # neg_log_var = (-torch.log(positive_z_vals_var + 1e-6)).mean()
 
-        loss = img_loss + rgb0_loss + depth_loss + (1e-4)*sigma_loss
+        loss = img_loss + rgb0_loss + depth_loss + (1e-5)*sigma_loss
 
         psnr = mse2psnr(img_loss)
 

@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '4'
+gpu_n = '6'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -750,10 +750,10 @@ def render_rays(ray_batch, or_ray_batch,
 
     epi_pts = rays_o[..., None, :] + rays_d[..., None, :] * depth_values[..., :, None]
 
-    # # aux loss
-    # aux_raw = network_query_fn(epi_pts, viewdirs, network_fine)
-    # iter = kwargs.get('iter',1e6)
-    # aux_rgb_map, _, _, _, _ = raw2outputs(aux_raw, depth_values, rays_d, raw_noise_std, white_bkgd, pytest=pytest, iter=iter)
+    # aux loss
+    aux_raw = network_query_fn(epi_pts, viewdirs, network_fine)
+    iter = kwargs.get('iter',1e6)
+    aux_rgb_map, _, _, _, _ = raw2outputs(aux_raw, depth_values, rays_d, raw_noise_std, white_bkgd, pytest=pytest, iter=iter)
     
     # plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:,None,:].repeat(1,num_pts,1)) # nump_pts + origin
     # plucker_embed = plucker_embed.view(-1, (num_pts+1)*6)
@@ -774,7 +774,7 @@ def render_rays(ray_batch, or_ray_batch,
     raw = network_query_fn(query_points_nerf, viewdirs, network_fine)
     iter = kwargs.get('iter',1e6)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, refine_depth_values, rays_d, raw_noise_std, white_bkgd, pytest=pytest, mm_density_add=mm_density_add, mm_density_mul=mm_density_mul, iter=iter)
-    ret = {'rgb_map0': refine_rgb, 'rgb_map1': rgb_map,'depth_map': depth_map, 'sigma1': raw[..., 3], 'sigma0': raw[..., 3], 'mm_rgb': mm_rgb, 'aux_rgb': rgb_map}
+    ret = {'rgb_map0': refine_rgb, 'rgb_map1': rgb_map,'depth_map': depth_map, 'sigma1': raw[..., 3], 'sigma0': aux_raw[..., 3], 'mm_rgb': mm_rgb, 'aux_rgb': aux_rgb_map}
     return ret
 
 
@@ -1017,26 +1017,27 @@ def train():
         img_loss = img2mse(rgb1, target_s)
         rgb0_loss = img2mse(rgb0, target_s)
         mm_rgb_loss = img2mse(extras['mm_rgb'], target_s)
-        # aux_rgb_loss = img2mse(extras['aux_rgb'], target_s)
+        aux_rgb_loss = img2mse(extras['aux_rgb'], target_s)
 
-        # if i < 30000:
-        #     depth_loss = img2mse(depth_map, target_depth[:,0])
-        # else:
-        #     depth_loss = img2mse(depth_map, target_depth[:,0])
+        if i < 30000:
+            depth_loss = img2mse(depth_map, target_depth[:,0])
+        else:
+            depth_loss = 10*img2mse(depth_map, target_depth[:,0])
 
-        # sigma_loss = 0
-        # if i < 30000:
-        #     sigma_loss = (1e-5)*(-(extras['sigma1']).mean()) # sigma loss for density
-        #     # sigma_loss += (1e-5)*(-(extras['sigma0']).mean()) # sigma loss for density
-        # elif i > 130000:
-        #     sigma_loss = 0
-        # else:
-        #     sigma_loss = (1e-5)*(-(extras['sigma1']).mean()) # sigma loss for density
-        #     # sigma_loss += (1e-6)*(-(extras['sigma0']).mean()) # sigma loss for density
-        depth_loss = 10*img2mse(depth_map, target_depth[:,0])
-        sigma_loss = (1e-5)*(-(extras['sigma1']).mean()) # sigma loss for density
+        sigma_loss = 0
+        if i < 30000:
+            sigma_loss = (1e-5)*(-(extras['sigma1']).mean()) # sigma loss for density
+            sigma_loss += (1e-5)*(-(extras['sigma0']).mean()) # sigma loss for density
+        elif i > 130000:
+            sigma_loss = 0
+        else:
+            sigma_loss = (1e-5)*(-(extras['sigma1']).mean()) # sigma loss for density
+            sigma_loss += (1e-6)*(-(extras['sigma0']).mean()) # sigma loss for density
 
-        loss = img_loss + rgb0_loss + depth_loss + sigma_loss + mm_rgb_loss
+        # depth_loss = 10*img2mse(depth_map, target_depth[:,0])
+        # sigma_loss = (1e-5)*(-(extras['sigma1']).mean()) # sigma loss for density
+
+        loss = img_loss + rgb0_loss + depth_loss + sigma_loss + mm_rgb_loss + aux_rgb_loss
 
         psnr = mse2psnr(img_loss)
 

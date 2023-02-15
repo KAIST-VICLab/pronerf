@@ -1,4 +1,4 @@
-expname = fixed_nerf_depthsup_usebatch_depthsup_12samples_density_add2mul_200k_epires4_aux_refine
+expname = fixed_nerf_depthsup_usebatch_depthsup_12samples_density_add2mul_200k_epires4_aux_refine_more13
 ft_path = logs_minmax/fixed_nerf_depthsup_usebatch_depthsup_12samples_density_add2mul_200k_epires4_aux/300000.tar
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
