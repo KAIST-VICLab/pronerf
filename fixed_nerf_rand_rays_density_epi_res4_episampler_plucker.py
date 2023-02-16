@@ -565,6 +565,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
     noise = 0.
+
     # if raw_noise_std > 0.:
     #     noise = torch.randn(raw[...,3].shape) * raw_noise_std
 
@@ -573,6 +574,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     #         np.random.seed(0)
     #         noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
     #         noise = torch.Tensor(noise)
+
     if mm_density_add is not None:
         alpha = raw2alpha(raw[...,3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
         if iter > 200000:
@@ -584,9 +586,10 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
 
+    
+    acc_map = torch.sum(weights, -1)
     depth_map = torch.sum(weights * z_vals, -1)
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
-    acc_map = torch.sum(weights, -1)
 
     if white_bkgd:
         rgb_map = rgb_map + (1.-acc_map[...,None])
@@ -623,61 +626,6 @@ def render_rays(ray_batch, or_ray_batch,
     or_rays_o, or_rays_d = or_ray_batch[:, 0:3], or_ray_batch[:, 3:6]  # [N_rays, 3] each
     or_bounds = torch.reshape(or_ray_batch[..., 6:8], [-1, 1, 2])
     or_near, or_far = or_bounds[0, 0, 0], or_bounds[0, 0, 1]  # [-1,1]
-
-    # with torch.no_grad():
-    #     pts, ray_enc_depth_values = compute_query_points_from_rays(
-    #         rays_o, rays_d, 0., 1., N_point_ray_enc, randomize=False)  # ! this is ndc space
-    #     depth_values_3d = (1/(1-ray_enc_depth_values - 1e-5)).repeat(N_rays,1)  #! convert ndc zval to 3d zval
-    #     num_pts = N_point_ray_enc
-    #     num_neighbor = kwargs['num_neighbor']
-    #     k_ref = kwargs['images'].shape[0]
-    #     ref_rgbs = kwargs['images']
-    #     ref_K = kwargs['ref_K']
-    #     ref_poses = kwargs['poses']
-
-    #     current_id = kwargs['batch_rays_nearest_id'][:,0].long()
-    #     target_pose = ref_poses[current_id]
-
-    #     rel_cam_dist = torch.sum((target_pose[:,None,:, 3] - ref_poses[:, :, 3]) ** 2, 2) ** (1 / 2)
-    #     _, rel_cam_idx = torch.sort(rel_cam_dist.detach(), dim=1)
-
-    #     if randomize:
-    #         ref_nos = rel_cam_idx[:,1:]
-    #         # Random but keep order, ! remove the first pose
-    #         order_idx = torch.from_numpy(np.array(sorted(random.sample(range(ref_nos.shape[1]), num_neighbor)))).to(device)
-    #         ref_nos = torch.gather(ref_nos, dim =1, index = order_idx[None].repeat(N_rays,1))
-    #     else:
-    #         # Nearest, testing do not remove first pose
-    #         ref_nos = rel_cam_idx[:, 0:num_neighbor]
-
-    
-    #     ref_rgb = (ref_rgbs.permute(0, 3, 1, 2))
-    #     ref_rgb = torch.repeat_interleave(ref_rgb, repeats=num_pts, dim=0)
-    #     ref_pose = torch.repeat_interleave(ref_poses, repeats=num_pts, dim=0)
-
-    #     ro1, rd1 = torch.transpose(or_rays_o, 0, 1).unsqueeze(0), torch.transpose(or_rays_d, 0, 1).unsqueeze(0)  # 1, 3, H*W
-    #     ro1, rd1 = ro1.repeat(num_pts * k_ref, 1, 1), rd1.repeat(num_pts * k_ref, 1, 1)
-    #     ref_K = ref_K.unsqueeze(0).repeat(num_pts * k_ref, 1, 1)
-    #     inv_K = torch.inverse(ref_K)
-
-    #     # ! warp H and W will be 1, N_rays
-    #     warp_H = 1
-    #     warp_W = N_rays
-    #     depths = depth_values_3d[None,None,:,:].repeat(k_ref,1,1,1) # k_ref, H, W, N_point_ray_enc
-    #     depths = (depths.permute(0, 3, 1, 2)).reshape(-1, warp_H, warp_W)  # k_ref * N_point_ray_enc, H, W
-
-    #     warps = inverse_warp.inverse_warp_rod1_rt2_coords(ref_rgb, depths, ro1, rd1, ref_pose, ref_K, inv_K, padding_mode='zeros')
-    #     warps_flat = warps.clone().view(1, k_ref, num_pts, 3, warp_H, warp_W)
-    #     rays_valid_id = ref_nos.transpose(0, 1)[None,:,None,None,None].repeat(1, 1, num_pts,3,1,1) 
-    #     valid_warps_flat = torch.gather(warps_flat, dim=1, index = rays_valid_id.long()) # 1, validid, N samples, 3, 1, N rays
-    #     mm_epi_features = (valid_warps_flat.view(num_pts, num_neighbor, 3, warp_H*warp_W).permute(3,0,1,2)).view(N_rays, num_pts, -1) # N rays, 3*num_pts
-        
-    # # 1. mm take point encoding and predict N samples points
-    # plucker_pts = kwargs['embed_rays'](pts, rays_d[:,None,:].repeat(1,N_point_ray_enc,1)) # nump_pts + origin
-    # # plucker_pts = plucker_pts.view(-1, (N_point_ray_enc)*6)
-    # # mm_input = torch.cat([plucker_pts, epi_features], dim =1)
-
-    # min_max_rays = min_max_ray_net(plucker_pts, mm_epi_features)
 
     with torch.no_grad():
         pts, _ = compute_query_points_from_rays(

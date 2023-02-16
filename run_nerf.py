@@ -190,9 +190,9 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
-            # rgb8 = to8b(depths[-1]/np.max(depths[-1]))
-            # filename = os.path.join(savedir, '{:03d}.png'.format(i))
-            # imageio.imwrite(filename, rgb8)
+            rgb8 = to8b(depths[-1]/np.max(depths[-1]))
+            filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
+            imageio.imwrite(filename, rgb8)
               
     # if len(psnrs) > 0:
     #     mean_psnr = 0
@@ -657,7 +657,7 @@ def train():
         ])
 
     if args.render_test:
-        render_poses = np.array(poses[i_test])
+        render_poses = np.array(poses)
 
     # Create log dir and copy the config file
     basedir = args.basedir
@@ -694,7 +694,7 @@ def train():
             if args.render_test:
                 # render_test switches to test poses
                 # images = torch.Tensor(images[i_test]).to(device)
-                images = images[i_test]
+                images = images
             else:
                 # Default is smoother render_poses path
                 images = None

@@ -470,6 +470,9 @@ def inverse_warp_rod1_rt2_coords(img, depth, ro1, rd1, c2w2, intrinsics, intrins
     X_norm = 2 * X / (Wfull - 1) - 1  # Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1) [B, H*W]
     Y_norm = 2 * Y / (Hfull - 1) - 1  # Idem [B, H*W]
 
+    unnorm_pixel_coords = torch.stack([X, Y], dim=2)
+    valid_mask = inbound(unnorm_pixel_coords, h=Hfull, w = Wfull).view(B,H,W)
+
     if padding_mode == 'zeros':
         X_mask = ((X_norm > 1) + (X_norm < -1)).detach()
         X_norm[X_mask] = 2  # make sure that no point in warped image is a combinaison of im and gray
@@ -492,100 +495,89 @@ def inverse_warp_rod1_rt2_coords(img, depth, ro1, rd1, c2w2, intrinsics, intrins
     else:
         projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode=padding_mode,
                                                     align_corners=True) 
-    return projected_img
+    
+    return projected_img, valid_mask
 
-# @torch.jit.script
-# def jit_inverse_warp_rod1_rt2_coords(img, depth, ro1, rd1, c2w2, intrinsics):
-#     B, H, W = depth.shape
-#     _, C, Hfull, Wfull = img.shape
+def inverse_warp_rod1_rt2_coords_feat(img, feat, depth, ro1, rd1, c2w2, intrinsics, intrinsics_inv, scale=1., padding_mode='zeros'):
+    """
+    Inverse warp a source image to the target image plane.
 
-#     R2 = c2w2[:, :, 0:3]
-#     t2 = c2w2[:, :, 3, None]
-#     R2_ = torch.transpose(R2, 2, 1)
-#     t2_ = -torch.bmm(R2_, t2)
+    Args:
+        img: the source image (where to sample pixels) -- [B, 3, H, W]
+        depth: depth map of the target image -- [B, H, W]
+        pose: 6DoF pose parameters from target to source -- [B, 6]
+        intrinsics: camera intrinsic matrix -- [B, 3, 3]
+        intrinsics_inv: inverse of the intrinsic matrix -- [B, 3, 3]
+    Returns:
+        Source image warped to the target image plane
+    """
+    B, H, W = depth.shape
+    _, C, Hfull, Wfull = img.shape
 
-#     # 1. Lift directly into 3D world coordinates [B, 3, H*W]
-#     w = ro1 + rd1 * depth.view(B, 1, -1)
+    R2 = c2w2[:, :, 0:3]
+    t2 = c2w2[:, :, 3, None]
+    R2_ = torch.transpose(R2, 2, 1)
+    t2_ = -torch.bmm(R2_, t2)
 
-#     # 3. Get camera coordinates in c2: c2 = R2'w + (-R2't2)
-#     c2 = torch.bmm(R2_, w) + t2_
+    # 1. Lift directly into 3D world coordinates [B, 3, H*W]
+    w = ro1 + rd1 * depth.view(B, 1, -1)
 
-#     # 4. Get pixel coordinates in c2: p2 = Kc2 / c2[z]
-#     z = torch.abs(c2[:, 2, None, :])
-#     c2_ = c2 / z
-#     c2_[:, 2, :] = 1
-#     c2_[:, 1, :] *= -1
-#     p2 = torch.bmm(intrinsics, c2_)
+    # 3. Get camera coordinates in c2: c2 = R2'w + (-R2't2)
+    c2 = torch.bmm(R2_, w) + t2_
 
-#     X = p2[:, 0]
-#     Y = p2[:, 1]
-#     X_norm = 2 * X / (Wfull - 1) - 1  # Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1) [B, H*W]
-#     Y_norm = 2 * Y / (Hfull - 1) - 1  # Idem [B, H*W]
+    # 4. Get pixel coordinates in c2: p2 = Kc2 / c2[z]
+    z = torch.abs(c2[:, 2, None, :])
+    c2_ = c2 / z
+    c2_[:, 2, :] = 1
+    c2_[:, 1, :] *= -1
+    p2 = torch.bmm(intrinsics, c2_)
 
-#     X_mask = ((X_norm > 1) + (X_norm < -1)).detach()
-#     X_norm[X_mask] = 2  # make sure that no point in warped image is a combinaison of im and gray
-#     Y_mask = ((Y_norm > 1) + (Y_norm < -1)).detach()
-#     Y_norm[Y_mask] = 2
+    X = p2[:, 0]
+    Y = p2[:, 1]
+    X_norm = 2 * X / (Wfull - 1) - 1  # Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1) [B, H*W]
+    Y_norm = 2 * Y / (Hfull - 1) - 1  # Idem [B, H*W]
 
-#     pixel_coords = torch.stack([X_norm, Y_norm], dim=2)  # [B, H*W, 2]
-#     src_pixel_coords = pixel_coords.view(B, H, W, 2)
+    unnorm_pixel_coords = torch.stack([X, Y], dim=2)
+    valid_mask = inbound(unnorm_pixel_coords, h=Hfull, w = Wfull).view(B,H,W)
 
-#     projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode='zeros', align_corners=True) 
-#     return projected_img
+    if padding_mode == 'zeros':
+        X_mask = ((X_norm > 1) + (X_norm < -1)).detach()
+        X_norm[X_mask] = 2  # make sure that no point in warped image is a combinaison of im and gray
+        Y_mask = ((Y_norm > 1) + (Y_norm < -1)).detach()
+        Y_norm[Y_mask] = 2
 
-# class WarpModule(torch.nn.Module):
-#     def __init__(self):
-#         super(WarpModule, self).__init__()
+    pixel_coords = torch.stack([X_norm, Y_norm], dim=2)  # [B, H*W, 2]
+    src_pixel_coords = pixel_coords.view(B, H, W, 2)
 
+    if scale != 1:
+        src_pixel_coords = torch.nn.functional.interpolate(torch.permute(src_pixel_coords, (0, 3, 1, 2)),
+                                                           size=(int(scale * H), int(scale * W)), mode='bilinear',
+                                                           align_corners=True)
+        src_pixel_coords = torch.permute(src_pixel_coords, (0, 2, 3, 1))
+        img = torch.nn.functional.interpolate(img, size=(int(scale * H), int(scale * W)), mode='bilinear',
+                                                           align_corners=True)
+        projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode=padding_mode,
+                                                    align_corners=True)
+        projected_img = torch.nn.functional.interpolate(projected_img, size=(H, W), mode='bilinear', align_corners=True)
+    else:
+        projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode=padding_mode,
+                                                    align_corners=True) 
+        projected_feat = torch.nn.functional.grid_sample(feat, src_pixel_coords, padding_mode=padding_mode,
+                                            align_corners=True) 
+    
+    return projected_img, projected_feat, valid_mask
 
-#     def forward(self, img, depth,
-#                     ro1, rd1,
-#                     c2w2, intrinsics):
-#         B, H, W = depth.shape
-#         _, C, Hfull, Wfull = img.shape
-
-#         R2 = c2w2[:, :, 0:3]
-#         t2 = c2w2[:, :, 3, None]
-#         R2_ = torch.transpose(R2, 2, 1)
-#         t2_ = -torch.bmm(R2_, t2)
-
-#         # 1. Lift directly into 3D world coordinates [B, 3, H*W]
-#         w = ro1 + rd1 * depth.view(B, 1, -1)
-
-#         # 3. Get camera coordinates in c2: c2 = R2'w + (-R2't2)
-#         c2 = torch.bmm(R2_, w) + t2_
-
-#         # 4. Get pixel coordinates in c2: p2 = Kc2 / c2[z]
-#         z = torch.abs(c2[:, 2, None, :])
-#         c2_ = c2 / z
-#         c2_[:, 2, :] = 1
-#         c2_[:, 1, :] *= -1
-#         p2 = torch.bmm(intrinsics, c2_)
-
-#         X = p2[:, 0]
-#         Y = p2[:, 1]
-#         X_norm = 2 * X / (Wfull - 1) - 1  # Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1) [B, H*W]
-#         Y_norm = 2 * Y / (Hfull - 1) - 1  # Idem [B, H*W]
-
-#         X_mask = ((X_norm > 1) + (X_norm < -1)).detach()
-#         X_norm[X_mask] = 2  # make sure that no point in warped image is a combinaison of im and gray
-#         Y_mask = ((Y_norm > 1) + (Y_norm < -1)).detach()
-#         Y_norm[Y_mask] = 2
-
-#         pixel_coords = torch.stack([X_norm, Y_norm], dim=2)  # [B, H*W, 2]
-#         src_pixel_coords = pixel_coords.view(B, H, W, 2)
-
-#         projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode='zeros', align_corners=True) 
-#         return projected_img
-
-# scripted_warp = torch.jit.script(WarpModule())
-# trt_warp = torch_tensorrt.compile(scripted_warp, 
-#     inputs= [torch_tensorrt.Input((1, 3, 756, 1008)), # img, depth, ro1, rd1, c2w2, intrinsics
-#             torch_tensorrt.Input((1, 1, 762048)),
-#             torch_tensorrt.Input((1, 3, 762048)),
-#             torch_tensorrt.Input((1, 3, 762048)),
-#             torch_tensorrt.Input((1, 3, 4)),
-#             torch_tensorrt.Input((1, 3, 3))
-#         ],
-#     enabled_precisions= { torch_tensorrt.dtype.half} # Run with FP16
-# )
+def inbound(pixel_locations, h, w):
+    """
+    check if the pixel locations are in valid range
+    :param pixel_locations: [..., 2]
+    :param h: height
+    :param w: weight
+    :return: mask, bool, [...]
+    """
+    return (
+        (pixel_locations[..., 0] <= w - 1.0)
+        & (pixel_locations[..., 0] >= 0)
+        & (pixel_locations[..., 1] <= h - 1.0)
+        & (pixel_locations[..., 1] >= 0)
+    )

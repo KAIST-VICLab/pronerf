@@ -429,7 +429,7 @@ def create_nerf(args):
     model_refine = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                     input_ch=2 + input_ch * args.N_samples if args.mm_emb else
                                     (3*args.num_neighbor) * args.N_samples + 6*(args.N_samples+1),
-                                    output_ch=args.N_samples, skips=args.mmnetskips)
+                                    output_ch=args.N_samples + 3, skips=args.mmnetskips)
     grad_vars.append({'params': model_refine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     # Create optimizer
@@ -685,23 +685,13 @@ def render_rays(ray_batch, or_ray_batch,
 
     epi_pts = rays_o[..., None, :] + rays_d[..., None, :] * depth_values[..., :, None]
 
-    # # aux loss
-    # aux_raw = network_query_fn(epi_pts, viewdirs, network_fine)
-    # iter = kwargs.get('iter',1e6)
-    # aux_rgb_map, _, _, _, aux_depth_map = raw2outputs(aux_raw, depth_values, rays_d, raw_noise_std, white_bkgd, pytest=pytest, iter=iter)
-    
     plucker_embed = kwargs['embed_rays'](torch.cat([rays_o[:,None],epi_pts], dim=1), rays_d[:,None,:].repeat(1,num_pts + 1,1)) # nump_pts + origin
     plucker_embed = plucker_embed.view(-1, (num_pts+1)*6)
 
-    # epi_pts = epi_pts.view(-1, num_pts * 3)
-    # refine_input = torch.cat([epi_pts, epi_features], dim =1)
-
     refine_input = torch.cat([plucker_embed, epi_features], dim =1)
-    refine_depth_values = torch.sigmoid(refine_net(refine_input))
-
-    # refine_depth_values = refine_depth_values * (far - near) + near  # B, Nsamples, H, W
-    # sort_out = torch.sort(refine_depth_values, dim=-1)
-    # refine_depth_values = sort_out[0]  # ! depth values are sorted, ndc space
+    refine_output = refine_net(refine_input)
+    refine_depth_values = torch.sigmoid(refine_output[:,:N_samples])
+    refine_rgb = torch.sigmoid(refine_output[:, N_samples:])
 
     mids = .5 * (depth_values[...,1:] + depth_values[...,:-1])
     upper = torch.cat([mids, 0.5*(far+depth_values[...,-1:])], -1) # upper cat far
@@ -714,7 +704,7 @@ def render_rays(ray_batch, or_ray_batch,
     raw = network_query_fn(query_points_nerf, viewdirs, network_fine)
     iter = kwargs.get('iter',1e6)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, refine_depth_values, rays_d, raw_noise_std, white_bkgd, pytest=pytest, mm_density_add=mm_density_add, mm_density_mul=mm_density_mul, iter=iter)
-    ret = {'rgb_map0': rgb_map, 'rgb_map1': rgb_map,'depth_map': depth_map, 'sigma1': raw[..., 3], 'mm_rgb': mm_rgb, 'z_vals': torch.cat([refine_depth_values, far],-1), 'weights': weights}
+    ret = {'rgb_map0': refine_rgb, 'rgb_map1': rgb_map,'depth_map': depth_map, 'sigma1': raw[..., 3], 'mm_rgb': mm_rgb, 'z_vals': torch.cat([refine_depth_values, far],-1), 'weights': weights}
     return ret
 
 
@@ -955,26 +945,13 @@ def train():
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb1, target_s)
+        
         rgb0_loss = img2mse(rgb0, target_s)
-
         depth_loss = img2mse(depth_map, target_depth[:,0])
         # depth_loss += img2mse(extras['depth_map0'], target_depth[:,0])
-
         mm_rgb_loss = img2mse(extras['mm_rgb'], target_s)
 
-        # dist loss
-        weights = extras['weights']
-        z_vals = extras['z_vals']
-        interval = (z_vals[:, 1:] - z_vals[:, :-1])
-        mids = (z_vals[:, 1:] + z_vals[:, :-1]) * 0.5
-        loss_uni = (1/3) * (interval * weights.pow(2)).sum(-1).mean()
-        ww = weights.unsqueeze(-1) * weights.unsqueeze(-2)          # [B,N,N]
-        mm = (mids.unsqueeze(-1) - mids.unsqueeze(-2)).abs()  # [B,N,N]
-        loss_bi = (ww * mm).sum((-1,-2)).mean()
-        dist_loss = loss_uni + loss_bi
-
-
-        # loss = img_loss + 10*depth_loss + (1e-3)*dist_loss
+        # loss = img_loss
         loss = img_loss + 10*depth_loss
 
         psnr = mse2psnr(img_loss)
