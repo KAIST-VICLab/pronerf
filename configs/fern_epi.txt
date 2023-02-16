@@ -1,4 +1,4 @@
-expname = fixed_nerf_depthsup_usebatch_depthsup_12samples_density_add2mul_200k_epires4_aux_offset_nodropout
+expname = fixed_nerf_depthsup_usebatch_depthsup_12samples_density_add2mul_200k_epires4_aux_offset
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
 
