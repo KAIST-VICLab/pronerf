@@ -1,6 +1,7 @@
-expname = fixed_nerf_depthsup_usebatch_depthsup_12samples_density_add2mul_200k_epires4_aux_offset_refine_inturn
-ft_path = logs_minmax/sampler/300000.tar
-datadir = ./data/nerf_llff_data/fern
+expname = leaves_sampler
+datadir = ./data/nerf_llff_data/leaves
+pretrain_depth_path = pretrained_depths/pretrained_depth_leaves.npy 
+pretrain_path = logs/leaves_reproduce/200000.tar
 dataset_type = llff
 
 factor = 4
@@ -14,17 +15,17 @@ N_importance = 0
 use_viewdirs = True
 raw_noise_std = 1e0
 
-lrate = 5e-5
+lrate = 5e-4
 a_p = 0.000
 a_mmrgb = 1.0
 a_mmdisp = 1.0
 mmnetdepth = 6
 mmnetwidth = 256
-mmnetskips = [10000]
+mmnetskips = [1000]
 N_point_ray_enc = 48
 mm_emb = False
 precrop_iters = 0
 precrop_frac = 0.5
-weight_decay = 1e-7
+weight_decay = 0e-7
 rand_crop_size = 128
 num_neighbor = 4

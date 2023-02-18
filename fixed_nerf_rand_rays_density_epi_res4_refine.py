@@ -342,15 +342,15 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             error = (error - np.min(error)) / (max(np.max(error) - np.min(error), 1e-8))
             error = cv2.applyColorMap((error * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
 
-            # # ssims
-            # ssim = img2ssim(rgb1.permute(2, 0, 1)[None], (gt_imgs[i]).permute(2, 0, 1)[None].cuda())
-            # ssims.append(ssim.cpu().numpy())
+            # ssims
+            ssim = img2ssim(rgb1.permute(2, 0, 1)[None], (gt_imgs[i]).permute(2, 0, 1)[None].cuda())
+            ssims.append(ssim.cpu().numpy())
 
-            # # lpips
-            # scaled_gt = (gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
-            # scaled_pred = rgb1.permute(2, 0, 1)[None] * 2.0 - 1.0
-            # lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
-            # lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
+            # lpips
+            scaled_gt = (gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
+            scaled_pred = rgb1.permute(2, 0, 1)[None] * 2.0 - 1.0
+            lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
+            lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
 
         if savedir is not None:
             rgb8 = to8b(rgbs1[-1])
@@ -363,6 +363,10 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
             filename = os.path.join(savedir, 'err{:03d}.png'.format(i))
             imageio.imwrite(filename, error)
+            
+            rgb8 = to8b(depths[-1]/np.max(depths[-1]))
+            filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
+            imageio.imwrite(filename, rgb8)
 
     rgbs0 = np.stack(rgbs0, 0)
     rgbs1 = np.stack(rgbs1, 0)
@@ -377,6 +381,8 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     #     psnrs = np.array(psnrs)
     #     print(f'Mean Test PSNR {psnrs.mean()}')
     # breakpoint()
+    print('LPIPS', np.array(lpips_res).mean())
+    print('SSIMS', np.array(ssims).mean())
     return rgbs0, rgbs1, depths, depths
 
 
@@ -429,7 +435,7 @@ def create_nerf(args):
     model_refine = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                     input_ch=2 + input_ch * args.N_samples if args.mm_emb else
                                     (3*args.num_neighbor) * args.N_samples + 6*(args.N_samples+1),
-                                    output_ch=args.N_samples + 3, skips=args.mmnetskips)
+                                    output_ch=args.N_samples, skips=args.mmnetskips)
     grad_vars.append({'params': model_refine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     # Create optimizer
@@ -671,7 +677,7 @@ def render_rays(ray_batch, or_ray_batch,
         depths = depth_values_3d[None,None,:,:].repeat(k_ref,1,1,1) # k_ref, H, W, N_point_ray_enc
         depths = (depths.permute(0, 3, 1, 2)).reshape(-1, warp_H, warp_W)  # k_ref * N_point_ray_enc, H, W
 
-        warps = inverse_warp.inverse_warp_rod1_rt2_coords(ref_rgb, depths, ro1, rd1, ref_pose, ref_K, inv_K, padding_mode='zeros')
+        warps, _ = inverse_warp.inverse_warp_rod1_rt2_coords(ref_rgb, depths, ro1, rd1, ref_pose, ref_K, inv_K, padding_mode='zeros')
         warps_flat = warps.clone().view(1, k_ref, num_pts, 3, warp_H, warp_W)
         rays_valid_id = ref_nos.transpose(0, 1)[None,:,None,None,None].repeat(1, 1, num_pts,3,1,1) 
         valid_warps_flat = torch.gather(warps_flat, dim=1, index = rays_valid_id.long()) # 1, validid, N samples, 3, 1, N rays
@@ -691,7 +697,7 @@ def render_rays(ray_batch, or_ray_batch,
     refine_input = torch.cat([plucker_embed, epi_features], dim =1)
     refine_output = refine_net(refine_input)
     refine_depth_values = torch.sigmoid(refine_output[:,:N_samples])
-    refine_rgb = torch.sigmoid(refine_output[:, N_samples:])
+    # refine_rgb = torch.sigmoid(refine_output[:, N_samples:])
 
     mids = .5 * (depth_values[...,1:] + depth_values[...,:-1])
     upper = torch.cat([mids, 0.5*(far+depth_values[...,-1:])], -1) # upper cat far
@@ -704,7 +710,7 @@ def render_rays(ray_batch, or_ray_batch,
     raw = network_query_fn(query_points_nerf, viewdirs, network_fine)
     iter = kwargs.get('iter',1e6)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, refine_depth_values, rays_d, raw_noise_std, white_bkgd, pytest=pytest, mm_density_add=mm_density_add, mm_density_mul=mm_density_mul, iter=iter)
-    ret = {'rgb_map0': refine_rgb, 'rgb_map1': rgb_map,'depth_map': depth_map, 'sigma1': raw[..., 3], 'mm_rgb': mm_rgb, 'z_vals': torch.cat([refine_depth_values, far],-1), 'weights': weights}
+    ret = {'rgb_map0': rgb_map, 'rgb_map1': rgb_map,'depth_map': depth_map, 'sigma1': raw[..., 3], 'mm_rgb': mm_rgb, 'z_vals': torch.cat([refine_depth_values, far],-1), 'weights': weights}
     return ret
 
 
@@ -946,10 +952,7 @@ def train():
         optimizer.zero_grad()
         img_loss = img2mse(rgb1, target_s)
         
-        rgb0_loss = img2mse(rgb0, target_s)
         depth_loss = img2mse(depth_map, target_depth[:,0])
-        # depth_loss += img2mse(extras['depth_map0'], target_depth[:,0])
-        mm_rgb_loss = img2mse(extras['mm_rgb'], target_s)
 
         # loss = img_loss
         loss = img_loss + 10*depth_loss

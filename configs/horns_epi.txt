@@ -1,7 +1,7 @@
-expname = fixed_nerf_depthsup_usebatch_depthsup_12samples_density_add2mul_200k_epires4_aux_offset
-datadir = ./data/nerf_llff_data/fern
-pretrain_depth_path = pretrained_depths/pretrained_depth_fern.npy 
-pretrain_path = logs/fern_reproduce/200000.tar
+expname = horns_sampler
+datadir = ./data/nerf_llff_data/horns
+pretrain_depth_path = pretrained_depths/pretrained_depth_horns.npy 
+pretrain_path = logs/horns_reproduce/200000.tar
 dataset_type = llff
 
 factor = 4

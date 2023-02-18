@@ -89,6 +89,10 @@ def config_parser():
                         help='do not reload weights from saved ckpt')
     parser.add_argument("--ft_path", type=str, default=None,
                         help='specific weights npy file to reload for coarse network')
+    parser.add_argument("--pretrain_path", type=str, default=None,
+                        help='specific weights npy file to reload pretrain network')
+    parser.add_argument("--pretrain_depth_path", type=str, default=None,
+                        help='specific weights npy file to reload pretrain depth')
     parser.add_argument("--num_neighbor", type=int, default=4,
                     help='num neighbor frames')
 
@@ -390,7 +394,7 @@ def create_nerf(args):
     input_ch_views = 0
     embeddirs_fn = None
     grad_vars = []
-    pretrain_ckpt = torch.load('logs/fern_reproduce/200000.tar')
+    pretrain_ckpt = torch.load(args.pretrain_path)
 
     if args.use_viewdirs:
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
@@ -873,7 +877,7 @@ def train():
         rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
         rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
 
-        pretrained_depth = np.load('logs_minmax/pretrained_depthx4_v2.npy')[:,:,:,None,None]
+        pretrained_depth = np.load(args.pretrain_depth_path)[:,:,:,None,None]
         pretrained_depth = np.repeat(pretrained_depth, 3, axis=-1)
 
         # rays_img_id = torch.from_numpy((np.array([[i] for i in i_train]))[:, None, None,None,:]).repeat((1, H, W, 1, 3))

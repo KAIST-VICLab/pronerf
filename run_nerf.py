@@ -657,7 +657,7 @@ def train():
         ])
 
     if args.render_test:
-        render_poses = np.array(poses)
+        render_poses = np.array(poses[i_train])
 
     # Create log dir and copy the config file
     basedir = args.basedir
@@ -694,7 +694,7 @@ def train():
             if args.render_test:
                 # render_test switches to test poses
                 # images = torch.Tensor(images[i_test]).to(device)
-                images = images
+                images = images[i_train]
             else:
                 # Default is smoother render_poses path
                 images = None
