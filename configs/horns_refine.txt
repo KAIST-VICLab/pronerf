@@ -1,7 +1,7 @@
-expname = room_sampler
-datadir = ./data/nerf_llff_data/room
-pretrain_depth_path = pretrained_depths/pretrained_depth_room.npy 
-pretrain_path = logs/room_reproduce/400000.tar
+expname = horns_refine
+pretrain_path = logs_minmax/horns_sampler/300000.tar
+pretrain_depth_path = pretrained_depths/pretrained_depth_horns.npy 
+datadir = ./data/nerf_llff_data/horns
 dataset_type = llff
 
 factor = 4
@@ -21,11 +21,11 @@ a_mmrgb = 1.0
 a_mmdisp = 1.0
 mmnetdepth = 6
 mmnetwidth = 256
-mmnetskips = [1000]
+mmnetskips = [10000]
 N_point_ray_enc = 48
 mm_emb = False
 precrop_iters = 0
 precrop_frac = 0.5
-weight_decay = 0e-7
+weight_decay = 5e-8
 rand_crop_size = 128
 num_neighbor = 4

@@ -1,5 +1,5 @@
 import os, sys
-gpu_n = '6'
+gpu_n = '4'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import numpy as np
@@ -140,6 +140,7 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
 def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
 
     H, W, focal = hwf
+    psnrs = []
 
     if render_factor!=0:
         # Render downsampled for speed
@@ -163,7 +164,8 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         
         if gt_imgs is not None and render_factor==0:
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i].cpu().numpy())))
-            print('psnr', p)
+            psnrs.append(p)
+            # print('psnr', p)
         
 
         if savedir is not None:
@@ -174,6 +176,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
+    print(np.array(psnrs).mean())
 
     return rgbs, disps
 
@@ -524,7 +527,7 @@ def config_parser():
                         help='frequency of console printout and metric loggin')
     parser.add_argument("--i_img",     type=int, default=500, 
                         help='frequency of tensorboard image logging')
-    parser.add_argument("--i_weights", type=int, default=10000, 
+    parser.add_argument("--i_weights", type=int, default=50000, 
                         help='frequency of weight ckpt saving')
     parser.add_argument("--i_testset", type=int, default=50000, 
                         help='frequency of testset saving')
@@ -701,7 +704,7 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
 
-    N_iters = 200000 + 1
+    N_iters = 500000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)

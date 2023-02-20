@@ -1,7 +1,7 @@
 expname = horns_sampler
 datadir = ./data/nerf_llff_data/horns
 pretrain_depth_path = pretrained_depths/pretrained_depth_horns.npy 
-pretrain_path = logs/horns_reproduce/200000.tar
+pretrain_path = logs/horns_reproduce/400000.tar
 dataset_type = llff
 
 factor = 4

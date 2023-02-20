@@ -1,5 +1,5 @@
 import os, sys
-gpu_n = '6'
+gpu_n = '4'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 import numpy as np
 import imageio
@@ -199,7 +199,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     #     for this_psnr in psnrs:
     #         mean_psnr = mean_psnr + this_psnr / len(psnrs)
     #     print(f'Mean Test PSNR {mean_psnr.detach().item()}')
-
+    print(np.array(psnrs).mean())
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
     depths = np.stack(depths, 0)

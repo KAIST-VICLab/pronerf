@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '6'
+gpu_n = '0'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -966,13 +966,19 @@ def train():
         mm_rgb_loss = img2mse(extras['mm_rgb'], target_s)
         aux_rgb_loss = img2mse(extras['aux_rgb'], target_s)
 
-        if i < 30000:
+        # ndepth = nerf_depth / torch.max(nerf_depth)
+        # ndepth = ndepth.view(N_rand, 1).detach()
+        # img_loss = torch.mean((1 - ndepth) * (rgb1 - target_s) ** 2 + ndepth * torch.abs(rgb1 - target_s))
+
+        # if i < 30000:
+        if True:
             depth_loss = img2mse(depth_map, target_depth[:,0])
         else:
             depth_loss = 10*img2mse(depth_map, target_depth[:,0])
 
         sigma_loss = 0
-        if i < 30000:
+        # if i < 30000:
+        if True:
             sigma_loss = (1e-5)*(-(extras['sigma1']).mean()) # sigma loss for density
             sigma_loss += (1e-5)*(-(extras['sigma0']).mean()) # sigma loss for density
         elif i > 130000:
