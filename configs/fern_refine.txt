@@ -1,5 +1,5 @@
-expname = fixed_nerf_depthsup_usebatch_depthsup_12samples_density_add2mul_200k_epires4_aux_offset_refine_inturn_5e8reg
-pretrain_path = logs_minmax/fixed_nerf_depthsup_usebatch_depthsup_12samples_density_add2mul_200k_epires4_aux_offset/300000.tar
+expname = fern_refine_l1
+pretrain_path = logs_minmax/fern_sampler/300000.tar
 pretrain_depth_path = pretrained_depths/pretrained_depth_fern.npy 
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
