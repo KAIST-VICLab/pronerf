@@ -1,6 +1,6 @@
-expname = blender_paper_drums
+expname = hotdog_reproduce
 basedir = ./logs
-datadir = ./data/nerf_synthetic/drums
+datadir = ./data/nerf_synthetic/hotdog
 dataset_type = blender
 
 no_batching = True

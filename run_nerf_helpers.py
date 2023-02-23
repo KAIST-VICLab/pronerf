@@ -7,6 +7,7 @@ import torch.utils.model_zoo as model_zoo
 import torchvision.models as models
 import torch.nn.init as init
 from kornia.losses import ssim_loss as dssim
+TINY_NUMBER = 1e-6  # float32 only has 7 decimal digits precision
 
 
 # Misc
@@ -20,6 +21,12 @@ def img2ssim(image_pred, image_gt, reduction="mean"):
     """
     dssim_ = dssim(image_pred, image_gt, 3, reduction=reduction)  # dissimilarity in [0, 1]
     return 1 - 2 * dssim_  # in [-1, 1]
+
+def angular_dist_between_2_vectors(vec1, vec2):
+    vec1_unit = vec1 / (np.linalg.norm(vec1, axis=1, keepdims=True) + TINY_NUMBER)
+    vec2_unit = vec2 / (np.linalg.norm(vec2, axis=1, keepdims=True) + TINY_NUMBER)
+    angular_dists = np.arccos(np.clip(np.sum(vec1_unit * vec2_unit, axis=-1), -1.0, 1.0))
+    return angular_dists
 
 def compute_angle(xyz, query_camera, train_cameras):
     """

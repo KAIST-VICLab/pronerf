@@ -330,6 +330,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         rays_nearest_id = nearest_pose[None, None,:].repeat(H, axis=0).repeat(W, axis=1).reshape(-1,render_kwargs['num_neighbor'] + 1)
         rays_nearest_id = torch.Tensor(rays_nearest_id).to(device)
         render_kwargs['batch_rays_nearest_id'] = rays_nearest_id
+        render_kwargs['target_pose'] = c2w
 
 
         rgb0, rgb1, depth_map, extras = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
@@ -643,8 +644,11 @@ def render_rays(ray_batch, or_ray_batch,
         ref_K = kwargs['ref_K']
         ref_poses = kwargs['poses']
 
-        current_id = kwargs['batch_rays_nearest_id'][:,0].long()
-        target_pose = ref_poses[current_id]
+        if randomize:
+            current_id = kwargs['batch_rays_nearest_id'][:,0].long()
+            target_pose = ref_poses[current_id]
+        else:
+            target_pose = kwargs['target_pose'][None].repeat(N_rays,1,1)
 
         rel_cam_dist = torch.sum((target_pose[:,None,:, 3] - ref_poses[:, :, 3]) ** 2, 2) ** (1 / 2)
         _, rel_cam_idx = torch.sort(rel_cam_dist.detach(), dim=1)
@@ -914,7 +918,7 @@ def train():
         rays_nearest_id = torch.Tensor(rays_nearest_id).to(device)
 
 
-    N_iters = 300000 + 1
+    N_iters = 500000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)

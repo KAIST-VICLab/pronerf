@@ -1,8 +1,9 @@
-expname = trex_sampler
-datadir = ./data/nerf_llff_data/trex
-pretrain_depth_path = pretrained_depths/pretrained_depth_trex.npy 
-pretrain_path = logs/trex_reproduce/200000.tar
+expname = fern_refine
+pretrain_path = logs_minmax/fern_sampler/300000.tar
+pretrain_depth_path = pretrained_depths/pretrained_depth_fern.npy 
+datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
+ft_path = logs_minmax/fern_refine_best/370000.tar
 
 factor = 4
 llffhold = 8
@@ -21,11 +22,11 @@ a_mmrgb = 1.0
 a_mmdisp = 1.0
 mmnetdepth = 6
 mmnetwidth = 256
-mmnetskips = [1000]
+mmnetskips = [10000]
 N_point_ray_enc = 48
 mm_emb = False
 precrop_iters = 0
 precrop_frac = 0.5
-weight_decay = 0e-7
+weight_decay = 5e-8
 rand_crop_size = 128
 num_neighbor = 4

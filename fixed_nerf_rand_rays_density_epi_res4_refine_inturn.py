@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '4'
+gpu_n = '0'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -327,7 +327,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         rays_nearest_id = nearest_pose[None, None,:].repeat(H, axis=0).repeat(W, axis=1).reshape(-1,render_kwargs['num_neighbor'] + 1)
         rays_nearest_id = torch.Tensor(rays_nearest_id).to(device)
         render_kwargs['batch_rays_nearest_id'] = rays_nearest_id
-
+        render_kwargs['target_pose'] = c2w
 
         rgb0, rgb1, depth_map, extras = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs0.append(rgb0.cpu().numpy())
@@ -651,9 +651,12 @@ def render_rays(ray_batch, or_ray_batch,
         ref_rgbs = kwargs['images']
         ref_K = kwargs['ref_K']
         ref_poses = kwargs['poses']
-
-        current_id = kwargs['batch_rays_nearest_id'][:,0].long()
-        target_pose = ref_poses[current_id]
+        
+        if randomize:
+            current_id = kwargs['batch_rays_nearest_id'][:,0].long()
+            target_pose = ref_poses[current_id]
+        else:
+            target_pose = kwargs['target_pose'][None].repeat(N_rays,1,1)
 
         rel_cam_dist = torch.sum((target_pose[:,None,:, 3] - ref_poses[:, :, 3]) ** 2, 2) ** (1 / 2)
         _, rel_cam_idx = torch.sort(rel_cam_dist.detach(), dim=1)
@@ -767,6 +770,8 @@ def train():
         i_val = i_test
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if
                         (i not in i_test and i not in i_val)])
+        # i_train = np.array([i for i in np.arange(int(images.shape[0])) if
+        #                 (i not in i_test and i not in i_val and i!=23 and i!=25)])
 
         print('DEFINING BOUNDS')
         if args.no_ndc:
@@ -896,6 +901,8 @@ def train():
         rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
 
         pretrained_depth = np.load(args.pretrain_depth_path)[:,:,:,None,None]
+        # # ! DEBUG
+        # pretrained_depth = np.stack([pretrained_depth[i] for i in range(pretrained_depth.shape[0]) if i!=20 and i!=21], 0)
         pretrained_depth = np.repeat(pretrained_depth, 3, axis=-1)
 
         # rays_img_id = torch.from_numpy((np.array([[i] for i in i_train]))[:, None, None,None,:]).repeat((1, H, W, 1, 3))

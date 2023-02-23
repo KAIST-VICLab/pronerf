@@ -1,6 +1,6 @@
-expname = blender_paper_mic
+expname = drums_reproduce
 basedir = ./logs
-datadir = ./data/nerf_synthetic/mic
+datadir = ./data/nerf_synthetic/drums
 dataset_type = blender
 
 no_batching = True

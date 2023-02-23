@@ -150,6 +150,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     rgbs = []
     disps = []
     depths = []
+    acc_maps = []
     psnrs = []
     ssims = []
     lpips_res = []
@@ -165,6 +166,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         depths.append(extras['depth_map'].cpu().numpy())
+        acc_maps.append(acc.cpu().numpy())
         if i==0:
             print(rgb.shape, disp.shape)
 
@@ -173,16 +175,16 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
             psnrs.append(p)
 
-            # ssims
-            ssim = img2ssim(rgb.permute(2, 0, 1)[None], torch.from_numpy(
-                gt_imgs[i]).permute(2, 0, 1)[None].cuda())
-            ssims.append(ssim.cpu().numpy())
+            # # ssims
+            # ssim = img2ssim(rgb.permute(2, 0, 1)[None], torch.from_numpy(
+            #     gt_imgs[i]).permute(2, 0, 1)[None].cuda())
+            # ssims.append(ssim.cpu().numpy())
 
-            # lpips
-            scaled_gt = torch.from_numpy(gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
-            scaled_pred = rgb.permute(2, 0, 1)[None] * 2.0 - 1.0
-            lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
-            lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
+            # # lpips
+            # scaled_gt = torch.from_numpy(gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
+            # scaled_pred = rgb.permute(2, 0, 1)[None] * 2.0 - 1.0
+            # lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
+            # lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
 
 
         if savedir is not None:
@@ -193,16 +195,21 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             rgb8 = to8b(depths[-1]/np.max(depths[-1]))
             filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
+
+            rgb8 = to8b(acc_maps[-1]/np.max(acc_maps[-1]))
+            filename = os.path.join(savedir, 'acc_{:03d}.png'.format(i))
+            imageio.imwrite(filename, rgb8)
               
     # if len(psnrs) > 0:
     #     mean_psnr = 0
     #     for this_psnr in psnrs:
     #         mean_psnr = mean_psnr + this_psnr / len(psnrs)
     #     print(f'Mean Test PSNR {mean_psnr.detach().item()}')
-    print(np.array(psnrs).mean())
+    print('mean psnrs:',np.array(psnrs).mean())
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
     depths = np.stack(depths, 0)
+    acc_maps = np.stack(acc_maps, 0)
     breakpoint()  
     return rgbs, disps
 

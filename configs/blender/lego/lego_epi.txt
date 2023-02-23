@@ -1,0 +1,35 @@
+expname = lego_sampler_with_color
+datadir = ./data/nerf_synthetic/lego
+pretrain_depth_path = pretrained_depths/pretrained_depth_lego.npy 
+pretrain_path = logs/lego_reproduce/500000.tar
+dataset_type = blender
+
+no_batching = True
+
+N_rand = 1024
+N_samples = 12
+N_importance = 0
+
+use_viewdirs = True
+white_bkgd = True
+lrate_decay = 500
+
+lrate = 5e-4
+a_p = 0.000
+a_mmrgb = 1.0
+a_mmdisp = 1.0
+mmnetdepth = 6
+mmnetwidth = 256
+mmnetskips = [1000]
+N_point_ray_enc = 48
+mm_emb = False
+precrop_iters = 0
+precrop_frac = 0.5
+weight_decay = 0e-7
+rand_crop_size = 128
+num_neighbor = 4
+
+precrop_iters = 500
+precrop_frac = 0.5
+
+half_res = True

@@ -1,6 +1,6 @@
-expname = blender_paper_ficus
+expname = lego_black_reproduce
 basedir = ./logs
-datadir = ./data/nerf_synthetic/ficus
+datadir = ./data/nerf_synthetic/lego
 dataset_type = blender
 
 no_batching = True

@@ -995,9 +995,11 @@ def train():
                                                 **render_kwargs_train)
 
         optimizer.zero_grad()
-        img_loss = img2mse(rgb1, target_s)
+        # img_loss = img2mse(rgb1, target_s)
+        img_loss = torch.mean(torch.abs(rgb1 - target_s))
+
         loss = img_loss
-        psnr = mse2psnr(img_loss)
+        psnr = mse2psnr(img2mse(rgb1, target_s))
         loss.backward()
         optimizer.step()
 
