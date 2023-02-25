@@ -12,8 +12,8 @@ import ctypes
 from ctypes import RTLD_GLOBAL
 from run_nerf_helpers import get_embedder
 
-gpu_n = '6'
-os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
+# gpu_n = '6'
+# os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 
 class Holder(PointerHolderBase):
 
@@ -151,7 +151,7 @@ class MMEngine(object):
         print("Allocating buffer for engine I/O")
         outputs = []
         bindings = []
-        print("Batch size: ", self.engine.max_batch_size)
+        # print("Batch size: ", self.engine.max_batch_size)
         out_ptr = 0
         for binding in self.engine:
             size = trt.volume(self.engine.get_binding_shape(binding)) * self.engine.max_batch_size
@@ -173,23 +173,31 @@ class MMEngine(object):
                 bindings.append(int(device_mem.gpudata))
         return outputs, bindings
 
-    def __init__(self, load_model, batch=1, in_ch=96):
+    def __init__(self, load_model, batch=756*1008, in_ch=288):
         t1 = time.time()
         self.batch_size = batch
         self.in_ch = in_ch
-        self.shape_of_output = [(batch, 4, 756, 1008)]
+        self.shape_of_output = [
+                        (batch, 3),# mm_rgb
+                        (batch, 8), # mm_density_add
+                        (batch, 8), # mm_density_mul
+                        (batch, 8), # depth_values
+                        ]
 
         self.trt_logger = trt.Logger(trt.Logger.INFO)
 
-        self.out = torch.zeros((batch * 4*756*1008), dtype=torch.float32).cuda()
+        self.mm_density_mul = torch.zeros((batch * 8), dtype=torch.float32).cuda()
+        self.mm_density_add = torch.zeros((batch * 8), dtype=torch.float32).cuda()
+        self.mm_rgb = torch.zeros((batch * 3), dtype=torch.float32).cuda()
+        self.depth_values = torch.zeros((batch * 8), dtype=torch.float32).cuda()
         
         # NOTE INPUT GPU MEM
-        self.input_gpu = gpuarray.empty(1*self.in_ch*756*1008, dtype=np.float32)
+        self.input_gpu = gpuarray.empty(batch*self.in_ch, dtype=np.float32)
         # NOTE INPUT HOST MEM
-        self.host_mem = cuda.pagelocked_empty((1,self.in_ch, 756, 1008), dtype=np.float32)
+        self.host_mem = cuda.pagelocked_empty((batch,self.in_ch), dtype=np.float32)
 
         # NOTE OUT GPU TENSOR
-        self.out_ptrs = [self.out]
+        self.out_ptrs = [self.mm_rgb, self.mm_density_add, self.mm_density_mul, self.depth_values]
         try:
             self.engine = self._load_engine(load_model)
             self.context = self.engine.create_execution_context()
@@ -212,11 +220,9 @@ class MMEngine(object):
         self.context.execute_async(
             bindings=self.bindings,
             stream_handle=self.stream.handle)
-
-
         self.stream.synchronize()
-        out  = [output.reshape(shape) for output, shape in zip(self.out_ptrs, self.shape_of_output)]
-        return out[0]
+        mm_rgb, mm_density_add, mm_density_mul, depth_values  = [output.reshape(shape) for output, shape in zip(self.out_ptrs, self.shape_of_output)]        
+        return mm_rgb, mm_density_add, mm_density_mul, depth_values
 
 class RefineEngine(object):
     def _load_engine(self, model_path):
@@ -227,7 +233,7 @@ class RefineEngine(object):
         print("Allocating buffer for engine I/O")
         outputs = []
         bindings = []
-        print("Batch size: ", self.engine.max_batch_size)
+        # print("Batch size: ", self.engine.max_batch_size)
         out_ptr = 0
         for binding in self.engine:
             size = trt.volume(self.engine.get_binding_shape(binding)) * self.engine.max_batch_size
@@ -249,24 +255,30 @@ class RefineEngine(object):
                 bindings.append(int(device_mem.gpudata))
         return outputs, bindings
 
-    def __init__(self, load_model, batch=1, in_ch=24):
+    def __init__(self, load_model, batch=756*1008, in_ch=150):
         t1 = time.time()
         self.batch_size = batch
         self.in_ch = in_ch
-        self.shape_of_output = [(batch, 4, 756, 1008)]
+        self.shape_of_output = [
+                        (batch, 8),# refine_depth_values
+                        (batch, 3), # refine_rgb
+                        (batch, 24), # points_offset
+                        ]
 
         self.trt_logger = trt.Logger(trt.Logger.INFO)
 
-        self.out = torch.zeros((batch * 4*756*1008), dtype=torch.float32).cuda()
+        self.refine_depth_values = torch.zeros((batch * 8), dtype=torch.float32).cuda()
+        self.refine_rgb = torch.zeros((batch * 3), dtype=torch.float32).cuda()
+        self.points_offset = torch.zeros((batch * 24), dtype=torch.float32).cuda()
         
         # NOTE INPUT GPU MEM
-        self.input_gpu = gpuarray.empty(1*self.in_ch*756*1008, dtype=np.float32)
+        self.input_gpu = gpuarray.empty(batch*self.in_ch, dtype=np.float32)
         # NOTE INPUT HOST MEM
-        self.host_mem = cuda.pagelocked_empty((1,self.in_ch,756,1008), dtype=np.float32)
+        self.host_mem = cuda.pagelocked_empty((batch,self.in_ch), dtype=np.float32)
         self.input_gpu_host_mem = None
 
         # NOTE OUT GPU TENSOR
-        self.out_ptrs = [self.out]
+        self.out_ptrs = [self.refine_depth_values, self.refine_rgb, self.points_offset]
         try:
             self.engine = self._load_engine(load_model)
             self.context = self.engine.create_execution_context()
@@ -290,10 +302,9 @@ class RefineEngine(object):
             bindings=self.bindings,
             stream_handle=self.stream.handle)
 
-
         self.stream.synchronize()
-        out  = [output.reshape(shape) for output, shape in zip(self.out_ptrs, self.shape_of_output)]
-        return out[0]
+        refine_depth_values, refine_rgb, points_offset  = [output.reshape(shape) for output, shape in zip(self.out_ptrs, self.shape_of_output)]
+        return refine_depth_values, refine_rgb, points_offset
 
 class NeRFEngine(object):
     def _load_engine(self, model_path):
@@ -304,7 +315,7 @@ class NeRFEngine(object):
         print("Allocating buffer for engine I/O")
         outputs = []
         bindings = []
-        print("Batch size: ", self.engine.max_batch_size)
+        # print("Batch size: ", self.engine.max_batch_size)
         out_ptr = 0
         for binding in self.engine:
             size = trt.volume(self.engine.get_binding_shape(binding)) * self.engine.max_batch_size
@@ -326,7 +337,7 @@ class NeRFEngine(object):
                 bindings.append(int(device_mem.gpudata))
         return outputs, bindings
 
-    def __init__(self, load_model, batch=756*1008*4, in_ch=[63,27]):
+    def __init__(self, load_model, batch=756*1008*8, in_ch=[63,27]):
         t1 = time.time()
         self.batch_size = batch
         self.in_ch = in_ch
@@ -380,52 +391,55 @@ class NeRFEngine(object):
         out  = [output.reshape(shape) for output, shape in zip(self.out_ptrs, self.shape_of_output)]
         return out[0]
 
-if __name__ == '__main__':
-    # setup
-    far_thresh, near_thresh = 1., 0.
-    embed_fn, _ = get_embedder(10, 0)
-    mm_input = np.load('dummy_inputs/mm_input.npy')
-    ray_origins = torch.from_numpy(np.load('dummy_inputs/ray_origins.npy')).cuda()
-    ray_directions = torch.from_numpy(np.load('dummy_inputs/ray_directions.npy')).cuda()
-    depth_values_gt = np.load("dummy_inputs/depth_values.npy")
-    depth_values0_gt = np.load("dummy_inputs/depth_values_0.npy")
-    depth_densities_gt = np.load("dummy_inputs/depth_densities.npy")
-    dst_gt = np.load("dummy_inputs/dst.npy")
-    mm_rgb_gt = np.load("dummy_inputs/mm_rgb.npy")
-    pts = np.load("dummy_inputs/pts.npy")
+# if __name__ == '__main__':
+#     # setup
+#     far_thresh, near_thresh = 1., 0.
+#     embed_fn, _ = get_embedder(10, 0)
+#     mm_input = np.load('dummy_inputs/mm_input.npy')
+#     ray_origins = torch.from_numpy(np.load('dummy_inputs/ray_origins.npy')).cuda()
+#     ray_directions = torch.from_numpy(np.load('dummy_inputs/ray_directions.npy')).cuda()
+#     depth_values_gt = np.load("dummy_inputs/depth_values.npy")
+#     depth_values0_gt = np.load("dummy_inputs/depth_values_0.npy")
+#     depth_densities_gt = np.load("dummy_inputs/depth_densities.npy")
+#     dst_gt = np.load("dummy_inputs/dst.npy")
+#     mm_rgb_gt = np.load("dummy_inputs/mm_rgb.npy")
+#     pts = np.load("dummy_inputs/pts.npy")
 
-    input = np.load("dummy_inputs/nerf_input.npy")
-    # input_holder = torch.zeros((input.shape[0], input.shape[1]), dtype=torch.float32).cuda()
-    input_holder = torch.from_numpy(input).flatten().cuda()
-    input_dir = np.load("dummy_inputs/nerf_input_dir.npy")
-    output = np.load("dummy_inputs/nerf_output.npy")
+#     input = np.load("dummy_inputs/nerf_input.npy")
+#     # input_holder = torch.zeros((input.shape[0], input.shape[1]), dtype=torch.float32).cuda()
+#     input_holder = torch.from_numpy(input).flatten().cuda()
+#     input_dir = np.load("dummy_inputs/nerf_input_dir.npy")
+#     output = np.load("dummy_inputs/nerf_output.npy")
 
-    # create_engine
-    mm_engine = MMEngine('logs_minmax/fern_4_ressample_rt/minmaxrays_net_fp16.trt')
-    nerf_engine = NeRFEngine('logs_minmax/fern_4_ressample_rt/nerf_fp16.trt')
+#     # create_engine
+#     mm_engine = MMEngine('logs_minmax/fern_4_ressample_rt/minmaxrays_net_fp16.trt')
+#     nerf_engine = NeRFEngine('logs_minmax/fern_4_ressample_rt/nerf_fp16.trt')
 
-    # bind inputs
-    mm_engine.bind_input(mm_input) # bind mm_input to mm engine
-    nerf_engine.bind_input_dir(input_dir) # bind viewdirs to nerf  
-    nerf_engine.bind_input(input_holder, warmup=True)
+#     # bind inputs
+#     mm_engine.bind_input(mm_input) # bind mm_input to mm engine
+#     nerf_engine.bind_input_dir(input_dir) # bind viewdirs to nerf  
+#     nerf_engine.bind_input(input_holder, warmup=True)
 
-    dst, depth_values, depth_densities, mm_rgb = mm_engine.run()
+#     dst, depth_values, depth_densities, mm_rgb = mm_engine.run()
     
     
-    depth_values = torch.sigmoid(depth_values) * (far_thresh - near_thresh) + near_thresh
-    depth_densities = torch.relu(depth_densities)
-    dst = torch.relu(dst)
-    sort_out = torch.sort(depth_values, dim=-1)
-    depth_values = sort_out[0]
-    depth_densities = depth_densities.view(-1)[sort_out[1].view(-1)].view(depth_densities.shape)
-    query_points = ray_origins[..., None, :] + ray_directions[..., None, :] * depth_values[..., :, None]
-    flat_query_points = query_points.view(-1, 3)
-    embed_xyz = embed_fn(flat_query_points).flatten()
+#     depth_values = torch.sigmoid(depth_values) * (far_thresh - near_thresh) + near_thresh
+#     depth_densities = torch.relu(depth_densities)
+#     dst = torch.relu(dst)
+#     sort_out = torch.sort(depth_values, dim=-1)
+#     depth_values = sort_out[0]
+#     depth_densities = depth_densities.view(-1)[sort_out[1].view(-1)].view(depth_densities.shape)
+#     query_points = ray_origins[..., None, :] + ray_directions[..., None, :] * depth_values[..., :, None]
+#     flat_query_points = query_points.view(-1, 3)
+#     embed_xyz = embed_fn(flat_query_points).flatten()
 
     
-    nerf_engine.bind_input(embed_xyz) # bind query points to nerf
-    for _ in range(5):
-        t = time.time()
-        raw = nerf_engine.run()
-        print('nerf', time.time()-t)
-    # np.testing.assert_allclose(raw.cpu().numpy(), output, rtol=1e-03, atol=1e-05)
+#     nerf_engine.bind_input(embed_xyz) # bind query points to nerf
+#     for _ in range(5):
+#         t = time.time()
+#         raw = nerf_engine.run()
+#         print('nerf', time.time()-t)
+#     # np.testing.assert_allclose(raw.cpu().numpy(), output, rtol=1e-03, atol=1e-05)
+
+
+    

@@ -2,7 +2,9 @@ import tensorrt as trt
 import sys
 import os
 
-
+gpu_n = '7'
+os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
+print(f'Training on GPU {gpu_n}')
 
 def get_engine(onnx_file_path="", engine_file_path="", fp16_mode=True, int8_mode=False, save_engine=True,max_batch_size=1, in_ch = 90):
     """Attempts to load a serialized engine if available, otherwise builds a new TensorRT engine and saves it."""
@@ -15,22 +17,20 @@ def get_engine(onnx_file_path="", engine_file_path="", fp16_mode=True, int8_mode
             1 << (int)(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
 
         with trt.Builder(logger) as builder, builder.create_network(*EXPLICIT_BATCH) as network, trt.OnnxParser(network, logger) as parser, builder.create_builder_config() as config:
-            config.max_workspace_size = 4194304
+            # config.max_workspace_size = 4194304
+            config.max_workspace_size = 20 << 30
             builder.max_batch_size = max_batch_size
             if fp16_mode:
                 config.set_flag(trt.BuilderFlag.FP16)
 
             profile = builder.create_optimization_profile()
 
-            # ! mm input     
-            # profile.set_shape("input", (1, in_ch, 756, 1008),(1, in_ch, 756, 1008),(1, in_ch, 756, 1008))
-
-            # # ! refine input     
-            profile.set_shape("input", (1, in_ch, 756, 1008),(1, in_ch, 756, 1008),(1, in_ch, 756, 1008))
-
-            # # ! nerf input: input 63, input_dir 27
+            # ! nerf input: input 63, input_dir 27
             # profile.set_shape("input", (max_batch_size, in_ch[0]),(max_batch_size, in_ch[0]),(max_batch_size, in_ch[0]))
             # profile.set_shape("input_dir", (max_batch_size, in_ch[1]),(max_batch_size, in_ch[1]),(max_batch_size, in_ch[1]))
+
+            # # ! refine input  + mm input   
+            profile.set_shape("input", (max_batch_size, in_ch),(max_batch_size, in_ch),(max_batch_size, in_ch))
 
             config.add_optimization_profile(profile)
 
@@ -57,14 +57,17 @@ def get_engine(onnx_file_path="", engine_file_path="", fp16_mode=True, int8_mode
 
 
 if __name__ == '__main__':
-    # ONNX_NAME = 'logs_minmax/fern_epinerf_trt/nerf.onnx'
-    # TRT_NAME = 'logs_minmax/fern_epinerf_trt/nerf_fp16.trt'
-    # get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=756*1008*4, in_ch=[63,27], fp16_mode=True)
+    # # convert nerf: Batch size nsamples*h*w
+    # ONNX_NAME = 'logs_minmax/fern_8samples_trtinfer/nerf.onnx'
+    # TRT_NAME = 'logs_minmax/fern_8samples_trtinfer/nerf_fp16.trt'
+    # get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=756*1008*8, in_ch=[63,27], fp16_mode=True)
 
-    # ONNX_NAME = 'logs_minmax/fern_epinerf_trt/min_max_ray_net.onnx'
-    # TRT_NAME = 'logs_minmax/fern_epinerf_trt/min_max_ray_net_fp16.trt'
-    # get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=1, in_ch=96, fp16_mode=True)
+    # # convert mm rays: Batch h*w, order: mm_density_add, mm_density_mul, mm_rgb, depth_values
+    # ONNX_NAME = 'logs_minmax/fern_8samples_trtinfer/minmaxrays_net.onnx'
+    # TRT_NAME = 'logs_minmax/fern_8samples_trtinfer/minmaxrays_net_fp16.trt'
+    # get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=756*1008, in_ch=288, fp16_mode=True)
 
-    ONNX_NAME = 'logs_minmax/fern_epinerf_trt/model_refine.onnx'
-    TRT_NAME = 'logs_minmax/fern_epinerf_trt/model_refine_fp16.trt'
-    get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=1, in_ch=24, fp16_mode=True)
+    # convert refine model: Batch size h*w, order: refine_depth_values, refine_rgb, points_offset
+    ONNX_NAME = 'logs_minmax/fern_8samples_trtinfer/refine_net.onnx'
+    TRT_NAME = 'logs_minmax/fern_8samples_trtinfer/refine_net_fp16.trt'
+    get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=756*1008, in_ch=150, fp16_mode=True)

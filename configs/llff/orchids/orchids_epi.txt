@@ -1,14 +1,14 @@
-expname = room_sampler_8samples
-datadir = ./data/nerf_llff_data/room
-pretrain_depth_path = pretrained_depths/pretrained_depth_room.npy 
-pretrain_path = logs/room_reproduce/400000.tar
+expname = orchids_sampler_8samples
+datadir = ./data/nerf_llff_data/orchids
+pretrain_depth_path = pretrained_depths/pretrained_depth_orchids.npy 
+pretrain_path = logs/orchids_reproduce/200000.tar
 dataset_type = llff
 
 factor = 4
 llffhold = 8
 k_ref = 1
 
-N_rand = 8192
+N_rand = 4096
 N_samples = 8
 N_importance = 0
 

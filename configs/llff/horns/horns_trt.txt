@@ -1,7 +1,10 @@
-expname = trex_refine_8samples
-pretrain_path = logs_minmax/trex_sampler_8samples/340000.tar
-pretrain_depth_path = pretrained_depths/pretrained_depth_trex.npy 
-datadir = ./data/nerf_llff_data/trex
+expname = horns_8samples_trtinfer
+ft_path = logs_minmax/horns_refine_8samples/480000.tar
+nerf_engine_path = logs_minmax/horns_8samples_trtinfer/nerf_fp16.trt
+mm_engine_path = logs_minmax/horns_8samples_trtinfer/minmaxrays_net_fp16.trt
+refine_engine_path = logs_minmax/horns_8samples_trtinfer/refine_net_fp16.trt
+
+datadir = ./data/nerf_llff_data/horns
 dataset_type = llff
 
 factor = 4
@@ -29,3 +32,5 @@ precrop_frac = 0.5
 weight_decay = 5e-8
 rand_crop_size = 128
 num_neighbor = 4
+
+use_trt = True

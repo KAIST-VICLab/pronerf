@@ -485,6 +485,7 @@ def create_nerf(args):
         nerf_engine =  NeRFEngine('logs_minmax/fern_epinerf_trt/nerf_fp16.trt')
         mm_engine = MMEngine('logs_minmax/fern_epinerf_trt/min_max_ray_net_fp16.trt')
         refine_engine = RefineEngine('logs_minmax/fern_epinerf_trt/model_refine_fp16.trt')
+    breakpoint()
 
     render_kwargs_train = {
         'network_query_fn': network_query_fn,

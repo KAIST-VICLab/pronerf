@@ -483,6 +483,73 @@ class MinMaxRay_Net(nn.Module):
         outputs = self.fc_output(h)
 
         return outputs
+    
+class MinMaxRaySamplerTRT_Net(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, output_ch=3, skips=[4], N_samples = 8):
+        """
+        """
+        super(MinMaxRaySamplerTRT_Net, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.skips = skips
+        self.N_samples = N_samples
+
+        self.fc_backbone = nn.ModuleList([nn.Linear(input_ch, W)] +
+                                         [nn.Linear(W, W) if i not in self.skips else
+                                          nn.Linear(W + input_ch, W) for i in range(D - 1)])
+
+        self.fc_output = nn.Linear(W, output_ch)
+
+    def forward(self, x):
+        h = x
+        for i, l in enumerate(self.fc_backbone):
+            h = self.fc_backbone[i](h)
+            h = F.elu(h)
+            if i in self.skips:
+                h = torch.cat([x, h], -1)
+
+        outputs = self.fc_output(h)
+
+        mm_rgb = torch.sigmoid(outputs[:, 3*self.N_samples:])
+        mm_density_add = outputs[:, self.N_samples:2*self.N_samples]
+        mm_density_mul = outputs[:, 2*self.N_samples:3*self.N_samples]
+        depth_values = torch.sigmoid(outputs[:, :self.N_samples])
+
+        return mm_rgb, mm_density_add, mm_density_mul, depth_values
+    
+class MinMaxRayEpiSamplerTRT_Net(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, output_ch=3, skips=[4], N_samples = 8):
+        """
+        """
+        super(MinMaxRayEpiSamplerTRT_Net, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.skips = skips
+        self.N_samples = N_samples
+
+        self.fc_backbone = nn.ModuleList([nn.Linear(input_ch, W)] +
+                                         [nn.Linear(W, W) if i not in self.skips else
+                                          nn.Linear(W + input_ch, W) for i in range(D - 1)])
+
+        self.fc_output = nn.Linear(W, output_ch)
+
+    def forward(self, x):
+        h = x
+        for i, l in enumerate(self.fc_backbone):
+            h = self.fc_backbone[i](h)
+            h = F.elu(h)
+            if i in self.skips:
+                h = torch.cat([x, h], -1)
+
+        outputs = self.fc_output(h)
+
+        refine_depth_values = torch.sigmoid(outputs[:,:self.N_samples])
+        refine_rgb = torch.sigmoid(outputs[:, 4*self.N_samples:])
+        points_offset = torch.tanh(outputs[:, self.N_samples:4*self.N_samples])
+
+        return refine_depth_values, refine_rgb, points_offset
 
 class MinMaxRay_NetEpiNPE0(nn.Module):
     def __init__(self, D=8, W=256, input_points=4, input_ch=3, input_epi=3, output_ch=3, skips=[4], npe_ch=16):

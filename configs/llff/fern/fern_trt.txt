@@ -1,29 +1,36 @@
-expname = fern_epinerf_trt
+expname = fern_8samples_trtinfer
+ft_path = logs_minmax/fern_refine_8samples/370000.tar
+nerf_engine_path = logs_minmax/fern_8samples_trtinfer/nerf_fp16.trt
+mm_engine_path = logs_minmax/fern_8samples_trtinfer/minmaxrays_net_fp16.trt
+refine_engine_path = logs_minmax/fern_8samples_trtinfer/refine_net_fp16.trt
+
 datadir = ./data/nerf_llff_data/fern
-ft_path = logs_minmax/fern_epinerf_ap_m1_1k_exp_refine/220000.tar
 dataset_type = llff
 
 factor = 4
 llffhold = 8
-k_ref = 16
-use_trt = True
+k_ref = 1
 
-N_rand = 1024
-N_samples = 4
+N_rand = 4096
+N_samples = 8
 N_importance = 0
 
 use_viewdirs = True
 raw_noise_std = 1e0
 
-lrate = 1e-4
-a_p = 0.001
-a_mmrgb = 0.0
-mmnetdepth = 8
-mmnetwidth = 128
+lrate = 5e-4
+a_p = 0.000
+a_mmrgb = 1.0
+a_mmdisp = 1.0
+mmnetdepth = 6
+mmnetwidth = 256
 mmnetskips = [10000]
-N_point_ray_enc = 32
+N_point_ray_enc = 48
 mm_emb = False
 precrop_iters = 0
 precrop_frac = 0.5
-weight_decay = 1e-7
-rand_crop_size = 200
+weight_decay = 5e-8
+rand_crop_size = 128
+num_neighbor = 4
+
+use_trt = True

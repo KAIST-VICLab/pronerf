@@ -1,5 +1,5 @@
 import os, sys
-gpu_n = '4'
+gpu_n = '2'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import numpy as np
@@ -20,6 +20,7 @@ from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
+from load_donerf import load_donerf_data
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -163,7 +164,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
         
         if gt_imgs is not None and render_factor==0:
-            p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
+            p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i].cpu().numpy())))
             psnrs.append(p)
             # print('psnr', p)
         
@@ -172,6 +173,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             rgb8 = to8b(rgbs[-1])
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
+
 
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
@@ -547,6 +549,8 @@ def train():
         images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
+        # images: Nfull, H, W, 3 | poses Nfull, 3, 5 | bds Nfull, 2 | i_test 
+        # donerf: all_rgb, poses, bounds
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
@@ -569,6 +573,13 @@ def train():
         else:
             near = 0.
             far = 1.
+        print('NEAR FAR', near, far)
+
+    elif args.dataset_type == 'donerf':
+        images, poses, near, far, hwf, render_poses, i_train, i_test = load_donerf_data()
+        print('Loaded donerf', images.shape, render_poses.shape, hwf, args.datadir)
+        i_val = i_test
+        print('DEFINING BOUNDS')
         print('NEAR FAR', near, far)
 
     elif args.dataset_type == 'blender':
@@ -625,7 +636,7 @@ def train():
         ])
 
     if args.render_test:
-        render_poses = np.array(poses[i_train])
+        render_poses = np.array(poses[i_test])
 
     # Create log dir and copy the config file
     basedir = args.basedir
@@ -661,7 +672,7 @@ def train():
         with torch.no_grad():
             if args.render_test:
                 # render_test switches to test poses
-                images = images[i_train]
+                images = images[i_test]
             else:
                 # Default is smoother render_poses path
                 images = None
