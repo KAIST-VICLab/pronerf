@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '6'
+gpu_n = '2'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
