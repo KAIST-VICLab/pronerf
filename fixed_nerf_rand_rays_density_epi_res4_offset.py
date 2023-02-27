@@ -26,6 +26,7 @@ from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
+from load_donerf import load_donerf_data
 
 t1, t2 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
@@ -762,6 +763,12 @@ def train():
         else:
             near = 0.
             far = 1.
+        print('NEAR FAR', near, far)
+    elif args.dataset_type == 'donerf':
+        images, poses, near, far, hwf, render_poses, i_train, i_test = load_donerf_data()
+        print('Loaded donerf', images.shape, render_poses.shape, hwf, args.datadir)
+        i_val = i_test
+        print('DEFINING BOUNDS')
         print('NEAR FAR', near, far)
 
     elif args.dataset_type == 'blender':

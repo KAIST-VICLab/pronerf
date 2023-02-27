@@ -1,6 +1,6 @@
-expname = babershop_reproduce
+expname = classroom_reproduce
 basedir = ./logs
-datadir = barbershop
+datadir = classroom
 dataset_type = donerf
 
 llffhold = 8

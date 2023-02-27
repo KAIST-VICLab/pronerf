@@ -217,7 +217,7 @@ class MMEngine(object):
 
     def run(self):
         # NOTE execute engine
-        self.context.execute_async(
+        self.context.execute_async_v2(
             bindings=self.bindings,
             stream_handle=self.stream.handle)
         self.stream.synchronize()
@@ -298,7 +298,7 @@ class RefineEngine(object):
 
     def run(self):
         # NOTE execute engine
-        self.context.execute_async(
+        self.context.execute_async_v2(
             bindings=self.bindings,
             stream_handle=self.stream.handle)
 
@@ -383,7 +383,7 @@ class NeRFEngine(object):
     def run(self):
         # self.stream.synchronize()
         # NOTE execute engine
-        self.context.execute_async(
+        self.context.execute_async_v2(
             bindings=self.bindings,
             stream_handle=self.stream.handle)
 

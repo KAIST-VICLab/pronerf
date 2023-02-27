@@ -238,10 +238,12 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     rgbs1 = []
     depths = []
     psnrs = []
-    ssims = []
-    lpips_res = []
-    lpips_vgg = lpips.LPIPS(net="vgg").cuda()
-    lpips_vgg = lpips_vgg.eval()
+
+    # ssims = []
+    # lpips_res = []
+    # lpips_vgg = lpips.LPIPS(net="vgg").cuda()
+    # lpips_vgg = lpips_vgg.eval()
+
     t1, t2 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
     for i, c2w in enumerate(tqdm(render_poses)):
@@ -281,6 +283,9 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         ref_nos = rel_cam_idx[:render_kwargs['num_neighbor']]
         render_kwargs['ref_nos'] = ref_nos
 
+        render_kwargs['neighbor_images'] = torch.Tensor(render_kwargs['images'])[ref_nos].to(device)
+        render_kwargs['neighbor_poses'] = render_kwargs['poses'][ref_nos]
+
         # Step 2 IMPORTANT: Bind input to gpu array
         if render_kwargs['use_trt']:
             input_dirs = viewdirs[:, None].repeat(1,render_kwargs['N_samples'],1)
@@ -297,12 +302,12 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             render_kwargs['refine_engine'].bind_input(refine_input_holder, warmup=True)
             _ = render_kwargs['refine_engine'].run()
 
-        # Step 3: Warm up run
-        rgb0, rgb1, depth_map, extras = render(rays, or_rays, sh, **render_kwargs)
+        # # Step 3: Warm up run
+        # rgb0, rgb1, depth_map, extras = render(rays, or_rays, sh, **render_kwargs)
 
         # Step 4: Measure inference time
         t1.record()
-        rgb0, rgb1, depth_map, extras = render(rays, or_rays, sh, **render_kwargs)
+        rgb0, rgb1, depth_map, _ = render(rays, or_rays, sh, **render_kwargs)
         t2.record()
         torch.cuda.synchronize(device=device)
         print('Render path time:', t1.elapsed_time(t2))
@@ -312,27 +317,23 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         rgbs1.append(rgb1.cpu().numpy())
         depths.append(depth_map.cpu().numpy())
 
-        if gt_imgs is not None and render_factor == 0:
-            p = mse2psnr(img2mse(rgb1, gt_imgs[i]))
-            psnrs.append(p)
+        # if gt_imgs is not None and render_factor == 0:
+        #     p = mse2psnr(img2mse(rgb1, gt_imgs[i]))
+        #     psnrs.append(p)
 
-            # ssims
-            ssim = img2ssim(rgb1.permute(2, 0, 1)[None], (gt_imgs[i]).permute(2, 0, 1)[None].cuda())
-            ssims.append(ssim.cpu().numpy())
+            # # ssims
+            # ssim = img2ssim(rgb1.permute(2, 0, 1)[None], (gt_imgs[i]).permute(2, 0, 1)[None].cuda())
+            # ssims.append(ssim.cpu().numpy())
 
-            # lpips
-            scaled_gt = (gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
-            scaled_pred = rgb1.permute(2, 0, 1)[None] * 2.0 - 1.0
-            lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
-            lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
+            # # lpips
+            # scaled_gt = (gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
+            # scaled_pred = rgb1.permute(2, 0, 1)[None] * 2.0 - 1.0
+            # lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
+            # lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
 
         if savedir is not None:
             rgb8 = to8b(rgbs1[-1])
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
-
-            rgb8 = to8b(gt_imgs[i].cpu().numpy())
-            filename = os.path.join(savedir, 'gt_{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
             rgb8 = to8b(depths[-1]/np.max(depths[-1]))
@@ -342,6 +343,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     rgbs0 = np.stack(rgbs0, 0)
     rgbs1 = np.stack(rgbs1, 0)
     depths = np.stack(depths, 0)
+
     if len(psnrs) > 0:
         mean_psnr = 0
         for this_psnr in psnrs:
@@ -349,8 +351,8 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         print(psnrs)
         print(f'Mean Test PSNR {mean_psnr.detach().item()}')
 
-    print('LPIPS', np.array(lpips_res).mean())
-    print('SSIMS', np.array(ssims).mean())
+    # print('LPIPS', np.array(lpips_res).mean())
+    # print('SSIMS', np.array(ssims).mean())
     return rgbs0, rgbs1, depths, depths
 
 def model2onnx(model, in_ch, savedir, model_name, batch_size):
@@ -405,15 +407,15 @@ def create_nerf(args):
     model = NeRFTRT(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
-
-    model.to(device)
+    if not args.use_trt:
+        model.to(device)
 
     model_fine = None
     model_fine = NeRFTRT(D=args.netdepth_fine, W=args.netwidth_fine,
                         input_ch=input_ch, output_ch=output_ch, skips=skips,
                         input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
-
-    model_fine.to(device)
+    if not args.use_trt:
+        model_fine.to(device)
     grad_vars_nerf.append({'params': model_fine.parameters(),
                     'weight_decay': args.weight_decay, 'lr': args.lrate})
 
@@ -609,12 +611,12 @@ def render_rays(ray_batch, or_ray_batch,
 
     if kwargs['use_trt']:
         t1.record()
-        mm_rgb, mm_density_add, mm_density_mul, depth_values = kwargs['mm_engine'].run()
+        _, mm_density_add, mm_density_mul, depth_values = kwargs['mm_engine'].run()
         t2.record()
         torch.cuda.synchronize(device=device)
         print('Sampler time:', t1.elapsed_time(t2))
     else:
-        mm_rgb, mm_density_add, mm_density_mul, depth_values = min_max_ray_net(kwargs['mm_input'])
+        _, mm_density_add, mm_density_mul, depth_values = min_max_ray_net(kwargs['mm_input'])
 
     depth_values = depth_values * (far - near) + near  # B, Nsamples, H, W
     sort_out = torch.sort(depth_values, dim=-1)
@@ -630,17 +632,15 @@ def render_rays(ray_batch, or_ray_batch,
     num_pts = N_samples
     num_neighbor = kwargs['num_neighbor']
     k_ref = num_neighbor
-    ref_rgbs = kwargs['images']
+    ref_rgb = kwargs['neighbor_images']
     ref_K = kwargs['ref_K']
-    ref_poses = kwargs['poses']
-    target_pose = kwargs['target_pose']
-    ref_nos = kwargs['ref_nos']
+    ref_pose = kwargs['neighbor_poses']
 
-    ref_rgb = ref_rgbs[ref_nos]
+    # ref_rgb = ref_rgbs[ref_nos]
     ref_rgb = (ref_rgb.permute(0, 3, 1, 2))
     ref_rgb = torch.repeat_interleave(ref_rgb, repeats=num_pts, dim=0)
 
-    ref_pose = ref_poses[ref_nos]
+    # ref_pose = ref_poses[ref_nos]
     ref_pose = torch.repeat_interleave(ref_pose, repeats=num_pts, dim=0)
     
     ro1, rd1 = torch.transpose(or_rays_o, 0, 1).unsqueeze(0), torch.transpose(or_rays_d, 0, 1).unsqueeze(0)  # 1, 3, H*W
@@ -708,16 +708,12 @@ def render_rays(ray_batch, or_ray_batch,
         t2.record()
         torch.cuda.synchronize(device=device)
         print('nerf time:', t1.elapsed_time(t2))
-
-        # dummy = np.load('dummy_inputs/raw.npy')
-        # np.testing.assert_allclose(dummy, raw.cpu().numpy(), rtol=1e-03, atol=1e-05)
-
     else:
         raw = network_query_fn(query_points_nerf, viewdirs, network_fine)
 
 
-    rgb_map, _, _, weights, depth_map = raw2outputs(raw, epi_z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest, mm_density_add=mm_density_add, mm_density_mul=mm_density_mul, iter=1e6)
-    ret = {'rgb_map0': refine_rgb, 'rgb_map1': rgb_map,'depth_map': depth_map, 'sigma1': raw[..., 3], 'mm_rgb': mm_rgb, 'z_vals': refine_depth_values, 'weights': weights, 'pts': query_points_nerf, 'rays_o': rays_o, 'rays_d': rays_d}
+    rgb_map, _, _, _, depth_map = raw2outputs(raw, epi_z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest, mm_density_add=mm_density_add, mm_density_mul=mm_density_mul, iter=1e6)
+    ret = {'rgb_map0': rgb_map, 'rgb_map1': rgb_map,'depth_map': depth_map}
     return ret
 
 
@@ -734,6 +730,7 @@ def train():
                                                                   spherify=args.spherify)
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
+        render_poses = render_poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
         if not isinstance(i_test, list):
             i_test = [i_test]
@@ -829,29 +826,25 @@ def train():
             file.write(open(args.config, 'r').read())
 
     # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, _, _, _ = create_nerf(args)
+    _, render_kwargs_test, start, _, _, _ = create_nerf(args)
 
     bds_dict = {
         'near' : near,
         'far' : far,
     }
-    render_kwargs_train.update(bds_dict)
+
     render_kwargs_test.update(bds_dict)
 
     # Move testing data to GPU
     render_poses = torch.Tensor(render_poses).to(device)
-    images = torch.Tensor(images).to(device)
+    # images = torch.Tensor(images)
     poses = torch.Tensor(poses).to(device)
 
     # update train val id
     K_ten = torch.Tensor(K.copy()).to(device)
-    render_kwargs_train['i_train'] = i_train
     render_kwargs_test['i_train'] = i_train
-    render_kwargs_train['images'] = images[i_train]
     render_kwargs_test['images'] = images[i_train]
-    render_kwargs_train['poses'] = poses[i_train]
     render_kwargs_test['poses'] = poses[i_train]
-    render_kwargs_train['ref_K'] = K_ten
     render_kwargs_test['ref_K'] = K_ten
 
     testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
@@ -859,36 +852,27 @@ def train():
     os.makedirs(testsavedir, exist_ok=True)
 
     os.makedirs(testsavedir, exist_ok=True)
-    print('test poses shape', poses[i_test].shape)
-    with torch.no_grad():
-        render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
-    print('Saved test set')
+    # print('test poses shape', poses[i_test].shape)
+    # with torch.no_grad():
+    #     render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+    # print('Saved test set')
 
-    # if (i % args.i_video == 0 and i > 0) or (args.render_only):
-    #     # Turn on testing mode
-    #     with torch.no_grad():
-    #         r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
-    #         rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
-    #     print('Done, saving', rgbs0.shape)
-    #     if args.render_only:
-    #         testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
-    #             'test' if args.render_test else 'path', start))
-    #         os.makedirs(testsavedir, exist_ok=True)
-    #         moviebase = os.path.join(
-    #             testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
-    #     else:
-    #         moviebase = os.path.join(
-    #             basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-    #     imageio.mimwrite(moviebase + 'rgb0.mp4',
-    #                      to8b(rgbs0), fps=30, quality=8)
-    #     imageio.mimwrite(moviebase + 'rgb1.mp4',
-    #                      to8b(rgbs1), fps=30, quality=8)
-    #     # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
-    #     imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
-    #                      np.percentile(depths, 99)), fps=30, quality=8)
-    #     imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
-    #                      np.percentile(depths0, 99)), fps=30, quality=8)
-    #     # print(f'Mean depth {np.mean(depths)}')
+
+    with torch.no_grad():
+        r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
+        rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
+    print('Done, saving', rgbs1.shape)
+
+    testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
+        'test' if args.render_test else 'path', start))
+    os.makedirs(testsavedir, exist_ok=True)
+    moviebase = os.path.join(
+        testsavedir, '{}_spiral_'.format(expname))
+
+    imageio.mimwrite(moviebase + 'rgb1.mp4',
+                        to8b(rgbs1), fps=30, quality=8)
+    imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
+                        np.percentile(depths, 99)), fps=30, quality=8)
 
 
 if __name__=='__main__':

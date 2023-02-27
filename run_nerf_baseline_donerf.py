@@ -1,5 +1,5 @@
 import os, sys
-gpu_n = '2'
+gpu_n = '7'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import numpy as np
@@ -254,7 +254,7 @@ def create_nerf(args):
     }
 
     # NDC only good for LLFF-style forward facing data
-    if args.dataset_type != 'llff' or args.no_ndc:
+    if args.dataset_type not in ['llff', 'donerf'] or args.no_ndc:
         print('Not ndc!')
         render_kwargs_train['ndc'] = False
         render_kwargs_train['lindisp'] = args.lindisp
@@ -576,10 +576,16 @@ def train():
         print('NEAR FAR', near, far)
 
     elif args.dataset_type == 'donerf':
-        images, poses, near, far, hwf, render_poses, i_train, i_test = load_donerf_data()
+        images, poses, near, far, hwf, render_poses, i_train, i_test = load_donerf_data(args.datadir, args.no_ndc)
         print('Loaded donerf', images.shape, render_poses.shape, hwf, args.datadir)
         i_val = i_test
         print('DEFINING BOUNDS')
+        if args.no_ndc:
+            pass
+        else:
+            near = 0.
+            far = 1.
+
         print('NEAR FAR', near, far)
 
     elif args.dataset_type == 'blender':

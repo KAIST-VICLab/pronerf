@@ -1,6 +1,6 @@
-expname = babershop_reproduce
+expname = sanmiguel_reproduce
 basedir = ./logs
-datadir = barbershop
+datadir = sanmiguel
 dataset_type = donerf
 
 llffhold = 8

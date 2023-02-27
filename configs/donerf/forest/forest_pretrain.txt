@@ -1,6 +1,6 @@
-expname = babershop_reproduce
+expname = forest_reproduce
 basedir = ./logs
-datadir = barbershop
+datadir = forest
 dataset_type = donerf
 
 llffhold = 8

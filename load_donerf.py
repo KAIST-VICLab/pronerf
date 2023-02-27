@@ -709,11 +709,19 @@ class DONeRFDataset(Base5DDataset):
         #self.depth_range = np.array([self.near * 1.5, self.far])
 
         self.view_cell_size = np.max(np.array(self.dataset_meta['view_cell_size']))
-        self.bounds = np.array([self.near, self.far])
 
         # Image paths and pose
         self.train_poses, _ = self.load_poses_from_meta(self.train_meta, self.dataset_meta)
         self.poses, self.image_paths = self.load_poses_from_meta(self.meta, self.dataset_meta)
+
+        # Rescale if bd_factor is provided
+        sc = 1./(self.near * 0.75)
+        self.poses[:,:3,3] *= sc
+        self.train_poses[:,:3,3] *= sc
+        self.near *= sc
+        self.far *= sc
+
+        self.bounds = np.array([self.near, self.far])
 
         # Correct
         if self.use_ndc or self.correct_poses:
@@ -917,15 +925,15 @@ class DONeRFDataset(Base5DDataset):
         return batch
 
 class DatasetConfig:
-    def __init__(self) -> None:
+    def __init__(self, collection, no_ndc) -> None:
         self.name = 'donerf'
-        self.collection = 'barbershop'
+        self.collection = collection
         self.data_subdir =  'donerf'
         self.root_dir = os.path.join('./data', self.data_subdir, self.collection)
 
         self.img_wh = [800, 800]
         self.spherical_poses = True
-        self.use_ndc: False
+        self.use_ndc = not no_ndc
         self.correct_poses = True
         self.center_poses = True
 
@@ -940,11 +948,11 @@ class DatasetConfig:
         }
 
 class Config():
-    def __init__(self) -> None:
-        self.dataset = DatasetConfig()
+    def __init__(self, collection, no_ndc) -> None:
+        self.dataset = DatasetConfig(collection, no_ndc)
 
-def load_donerf_data():
-    cfg = Config()
+def load_donerf_data(collection, no_ndc):
+    cfg = Config(collection, no_ndc)
     train_set = DONeRFDataset(cfg, 'train')
     images_train, poses_train, near, far = train_set.all_rgb, train_set.poses, train_set.near, train_set.far
     test_set = DONeRFDataset(cfg, 'test')
