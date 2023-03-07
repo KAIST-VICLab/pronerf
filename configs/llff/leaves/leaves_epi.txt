@@ -1,4 +1,4 @@
-expname = leaves_sampler_8samples
+expname = leaves_sampler_e2e_donerf_8samples_2
 datadir = ./data/nerf_llff_data/leaves
 pretrain_depth_path = pretrained_depths/pretrained_depth_leaves.npy 
 pretrain_path = logs/leaves_reproduce/200000.tar

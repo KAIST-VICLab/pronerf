@@ -9,4 +9,5 @@ data/*
 logs/*
 logs_minmax/*
 logs_epi/*
+logs_*/
 data

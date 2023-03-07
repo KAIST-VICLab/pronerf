@@ -1,4 +1,4 @@
-expname = babershop_reproduce
+expname = barbershop_reproduce
 basedir = ./logs
 datadir = barbershop
 dataset_type = donerf

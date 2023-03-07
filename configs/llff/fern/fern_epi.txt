@@ -1,12 +1,10 @@
-expname = fern_sampler_4samples
+expname = fern_sampler_e2e_donerf_4samples
 datadir = ./data/nerf_llff_data/fern
-pretrain_depth_path = pretrained_depths/pretrained_depth_fern.npy 
-pretrain_path = logs/fern_reproduce/200000.tar
 dataset_type = llff
 
 factor = 4
 llffhold = 8
-k_ref = 1
+k_ref = 0
 
 N_rand = 4096
 N_samples = 4

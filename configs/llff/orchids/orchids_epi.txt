@@ -1,4 +1,4 @@
-expname = orchids_sampler_8samples
+expname = orchids_sampler_e2e_donerf_4samples
 datadir = ./data/nerf_llff_data/orchids
 pretrain_depth_path = pretrained_depths/pretrained_depth_orchids.npy 
 pretrain_path = logs/orchids_reproduce/200000.tar
@@ -9,7 +9,7 @@ llffhold = 8
 k_ref = 1
 
 N_rand = 4096
-N_samples = 8
+N_samples = 4
 N_importance = 0
 
 use_viewdirs = True

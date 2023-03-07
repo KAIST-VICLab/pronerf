@@ -1,5 +1,5 @@
 import os, sys
-gpu_n = '7'
+gpu_n = '2'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import numpy as np
@@ -151,14 +151,16 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
     rgbs = []
     disps = []
+    depths = []
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
         print(i, time.time() - t)
         t = time.time()
-        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+        rgb, disp, acc, extras = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
+        depths.append(extras['depth_map'].cpu().numpy())
         if i==0:
             print(rgb.shape, disp.shape)
 
@@ -166,7 +168,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         if gt_imgs is not None and render_factor==0:
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i].cpu().numpy())))
             psnrs.append(p)
-            # print('psnr', p)
+            print('psnr', p)
         
 
         if savedir is not None:
@@ -174,9 +176,15 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
+            rgb8 = to8b(depths[-1]/np.max(depths[-1]))
+            filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
+            imageio.imwrite(filename, rgb8)
+
 
     rgbs = np.stack(rgbs, 0)
     disps = np.stack(disps, 0)
+    depths = np.stack(depths, 0)
+    breakpoint()
     print(np.array(psnrs).mean())
 
     return rgbs, disps
@@ -409,7 +417,7 @@ def render_rays(ray_batch,
 
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
-    ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
+    ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map, 'depth_map': depth_map}
     if retraw:
         ret['raw'] = raw
     if N_importance > 0:
@@ -678,7 +686,7 @@ def train():
         with torch.no_grad():
             if args.render_test:
                 # render_test switches to test poses
-                images = images[i_test]
+                images = torch.Tensor(images[i_test]).to(device)
             else:
                 # Default is smoother render_poses path
                 images = None

@@ -15,6 +15,10 @@ from run_nerf_helpers import get_embedder
 # gpu_n = '6'
 # os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 
+N_SAMPLES = 12
+N_POINT_RAY_ENC = 48
+NUM_NEIGHBOR = 4
+
 class Holder(PointerHolderBase):
 
     def __init__(self, tensor):
@@ -173,23 +177,23 @@ class MMEngine(object):
                 bindings.append(int(device_mem.gpudata))
         return outputs, bindings
 
-    def __init__(self, load_model, batch=756*1008, in_ch=288):
+    def __init__(self, load_model, batch=756*1008, in_ch=6*N_POINT_RAY_ENC):
         t1 = time.time()
         self.batch_size = batch
         self.in_ch = in_ch
         self.shape_of_output = [
                         (batch, 3),# mm_rgb
-                        (batch, 8), # mm_density_add
-                        (batch, 8), # mm_density_mul
-                        (batch, 8), # depth_values
+                        (batch, N_SAMPLES), # mm_density_add
+                        (batch, N_SAMPLES), # mm_density_mul
+                        (batch, N_SAMPLES), # depth_values
                         ]
 
         self.trt_logger = trt.Logger(trt.Logger.INFO)
 
-        self.mm_density_mul = torch.zeros((batch * 8), dtype=torch.float32).cuda()
-        self.mm_density_add = torch.zeros((batch * 8), dtype=torch.float32).cuda()
+        self.mm_density_mul = torch.zeros((batch * N_SAMPLES), dtype=torch.float32).cuda()
+        self.mm_density_add = torch.zeros((batch * N_SAMPLES), dtype=torch.float32).cuda()
         self.mm_rgb = torch.zeros((batch * 3), dtype=torch.float32).cuda()
-        self.depth_values = torch.zeros((batch * 8), dtype=torch.float32).cuda()
+        self.depth_values = torch.zeros((batch * N_SAMPLES), dtype=torch.float32).cuda()
         
         # NOTE INPUT GPU MEM
         self.input_gpu = gpuarray.empty(batch*self.in_ch, dtype=np.float32)
@@ -255,21 +259,21 @@ class RefineEngine(object):
                 bindings.append(int(device_mem.gpudata))
         return outputs, bindings
 
-    def __init__(self, load_model, batch=756*1008, in_ch=150):
+    def __init__(self, load_model, batch=756*1008, in_ch=(3*NUM_NEIGHBOR) * N_SAMPLES + 6*(N_SAMPLES)):
         t1 = time.time()
         self.batch_size = batch
         self.in_ch = in_ch
         self.shape_of_output = [
-                        (batch, 8),# refine_depth_values
+                        (batch, N_SAMPLES),# refine_depth_values
                         (batch, 3), # refine_rgb
-                        (batch, 24), # points_offset
+                        (batch, 3*N_SAMPLES), # points_offset
                         ]
 
         self.trt_logger = trt.Logger(trt.Logger.INFO)
 
-        self.refine_depth_values = torch.zeros((batch * 8), dtype=torch.float32).cuda()
+        self.refine_depth_values = torch.zeros((batch * N_SAMPLES), dtype=torch.float32).cuda()
         self.refine_rgb = torch.zeros((batch * 3), dtype=torch.float32).cuda()
-        self.points_offset = torch.zeros((batch * 24), dtype=torch.float32).cuda()
+        self.points_offset = torch.zeros((batch * 3*N_SAMPLES), dtype=torch.float32).cuda()
         
         # NOTE INPUT GPU MEM
         self.input_gpu = gpuarray.empty(batch*self.in_ch, dtype=np.float32)
@@ -337,7 +341,7 @@ class NeRFEngine(object):
                 bindings.append(int(device_mem.gpudata))
         return outputs, bindings
 
-    def __init__(self, load_model, batch=756*1008*8, in_ch=[63,27]):
+    def __init__(self, load_model, batch=756*1008*N_SAMPLES, in_ch=[63,27]):
         t1 = time.time()
         self.batch_size = batch
         self.in_ch = in_ch

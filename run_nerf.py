@@ -1,5 +1,5 @@
 import os, sys
-gpu_n = '4'
+gpu_n = '1'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 import numpy as np
 import imageio
@@ -175,6 +175,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         if gt_imgs is not None and render_factor==0:
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
             psnrs.append(p)
+            print(p)
 
             # # ssims
             # ssim = img2ssim(rgb.permute(2, 0, 1)[None], torch.from_numpy(
@@ -197,9 +198,9 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
-            rgb8 = to8b(acc_maps[-1]/np.max(acc_maps[-1]))
-            filename = os.path.join(savedir, 'acc_{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
+            # rgb8 = to8b(acc_maps[-1]/np.max(acc_maps[-1]))
+            # filename = os.path.join(savedir, 'acc_{:03d}.png'.format(i))
+            # imageio.imwrite(filename, rgb8)
               
     # if len(psnrs) > 0:
     #     mean_psnr = 0
@@ -293,7 +294,7 @@ def create_nerf(args):
     }
 
     # NDC only good for LLFF-style forward facing data
-    if args.dataset_type != 'llff' or args.no_ndc:
+    if args.dataset_type not in ['llff', 'donerf'] or args.no_ndc:
         print('Not ndc!')
         render_kwargs_train['ndc'] = False
         render_kwargs_train['lindisp'] = args.lindisp
@@ -438,7 +439,7 @@ def render_rays(ray_batch,
         z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
         z_samples = z_samples.detach()
 
-        z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
+        z_vals, _ = torch.sort(torch.cat([z_samples], -1), -1)
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
 
         run_fn = network_fn if network_fine is None else network_fine
@@ -611,10 +612,16 @@ def train():
             far = 1.
         print('NEAR FAR', near, far)
     elif args.dataset_type == 'donerf':
-        images, poses, near, far, hwf, render_poses, i_train, i_test = load_donerf_data()
+        images, poses, near, far, hwf, render_poses, i_train, i_test = load_donerf_data(args.datadir, args.no_ndc)
         print('Loaded donerf', images.shape, render_poses.shape, hwf, args.datadir)
         i_val = i_test
         print('DEFINING BOUNDS')
+        if args.no_ndc:
+            pass
+        else:
+            near = 0.
+            far = 1.
+
         print('NEAR FAR', near, far)
 
     elif args.dataset_type == 'blender':

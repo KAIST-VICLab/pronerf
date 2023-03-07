@@ -4,7 +4,7 @@ nerf_engine_path = logs_minmax/fern_8samples_trtinfer/nerf_fp16.trt
 mm_engine_path = logs_minmax/fern_8samples_trtinfer/minmaxrays_net_fp16.trt
 refine_engine_path = logs_minmax/fern_8samples_trtinfer/refine_net_fp16.trt
 
-datadir = ./data/nerf_llff_data/fern
+datadir = data/nerf_llff_data/fern
 dataset_type = llff
 
 factor = 4
@@ -33,4 +33,4 @@ weight_decay = 5e-8
 rand_crop_size = 128
 num_neighbor = 4
 
-use_trt = True
+use_trt = False

@@ -2,11 +2,11 @@ import tensorrt as trt
 import sys
 import os
 
-gpu_n = '7'
+gpu_n = '5'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 
-def get_engine(onnx_file_path="", engine_file_path="", fp16_mode=True, int8_mode=False, save_engine=True,max_batch_size=1, in_ch = 90):
+def get_engine(onnx_file_path="", engine_file_path="", fp16_mode=True, int8_mode=False, save_engine=True,max_batch_size=1, in_ch = 90, is_nerf = True):
     """Attempts to load a serialized engine if available, otherwise builds a new TensorRT engine and saves it."""
 
     def build_engine(max_batch_size, save_engine):
@@ -25,12 +25,13 @@ def get_engine(onnx_file_path="", engine_file_path="", fp16_mode=True, int8_mode
 
             profile = builder.create_optimization_profile()
 
-            # ! nerf input: input 63, input_dir 27
-            # profile.set_shape("input", (max_batch_size, in_ch[0]),(max_batch_size, in_ch[0]),(max_batch_size, in_ch[0]))
-            # profile.set_shape("input_dir", (max_batch_size, in_ch[1]),(max_batch_size, in_ch[1]),(max_batch_size, in_ch[1]))
-
-            # # ! refine input  + mm input   
-            profile.set_shape("input", (max_batch_size, in_ch),(max_batch_size, in_ch),(max_batch_size, in_ch))
+            if is_nerf:
+                # ! nerf input: input 63, input_dir 27
+                profile.set_shape("input", (max_batch_size, in_ch[0]),(max_batch_size, in_ch[0]),(max_batch_size, in_ch[0]))
+                profile.set_shape("input_dir", (max_batch_size, in_ch[1]),(max_batch_size, in_ch[1]),(max_batch_size, in_ch[1]))
+            else:
+                # ! refine input  + mm input   
+                profile.set_shape("input", (max_batch_size, in_ch),(max_batch_size, in_ch),(max_batch_size, in_ch))
 
             config.add_optimization_profile(profile)
 
@@ -57,17 +58,24 @@ def get_engine(onnx_file_path="", engine_file_path="", fp16_mode=True, int8_mode
 
 
 if __name__ == '__main__':
-    # # convert nerf: Batch size nsamples*h*w
-    # ONNX_NAME = 'logs_minmax/fern_8samples_trtinfer/nerf.onnx'
-    # TRT_NAME = 'logs_minmax/fern_8samples_trtinfer/nerf_fp16.trt'
-    # get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=756*1008*8, in_ch=[63,27], fp16_mode=True)
+    N_samples = 12
+    N_point_ray_enc = 48
+    num_neighbor = 4
+    root_dir = 'logs_trt/leaves_12samples_trtinfer'
 
-    # # convert mm rays: Batch h*w, order: mm_density_add, mm_density_mul, mm_rgb, depth_values
-    # ONNX_NAME = 'logs_minmax/fern_8samples_trtinfer/minmaxrays_net.onnx'
-    # TRT_NAME = 'logs_minmax/fern_8samples_trtinfer/minmaxrays_net_fp16.trt'
-    # get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=756*1008, in_ch=288, fp16_mode=True)
+
+    # # convert nerf: Batch size nsamples*h*w
+    # ONNX_NAME = os.path.join(root_dir, 'nerf.onnx')
+    # TRT_NAME = os.path.join(root_dir, 'nerf_fp16.trt')
+    # get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=756*1008*N_samples, in_ch=[63,27], fp16_mode=True)
+    # # get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=756*1008*8, in_ch=[3,3], fp16_mode=True)
+
+    # convert mm rays: Batch h*w, order: mm_density_add, mm_density_mul, mm_rgb, depth_values
+    ONNX_NAME = os.path.join(root_dir, 'minmaxrays_net.onnx')
+    TRT_NAME = os.path.join(root_dir, 'minmaxrays_net_fp16.trt')
+    get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=756*1008, in_ch=(6) * N_point_ray_enc, fp16_mode=True, is_nerf = False)
 
     # convert refine model: Batch size h*w, order: refine_depth_values, refine_rgb, points_offset
-    ONNX_NAME = 'logs_minmax/fern_8samples_trtinfer/refine_net.onnx'
-    TRT_NAME = 'logs_minmax/fern_8samples_trtinfer/refine_net_fp16.trt'
-    get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=756*1008, in_ch=150, fp16_mode=True)
+    ONNX_NAME = os.path.join(root_dir, 'refine_net.onnx')
+    TRT_NAME = os.path.join(root_dir, 'refine_net_fp16.trt')
+    get_engine(onnx_file_path=ONNX_NAME,engine_file_path=TRT_NAME, max_batch_size=756*1008, in_ch=(3*num_neighbor) * N_samples + 6*(N_samples), fp16_mode=True, is_nerf = False)

@@ -2,9 +2,11 @@ from __future__ import division
 import torch
 from torch.autograd import Variable
 import torch.nn.functional as F
+from opt_einsum import contract
 torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
 pixel_coords = None
+time1, time2 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
 def bwd_warp(H, W, K, world_points, src_imgs, src_poses, patch_H, patch_W):
     homo_world_points = torch.cat(
@@ -432,7 +434,6 @@ def inverse_warp_rod1_rt2_v2(img, depth, points, c2w2, intrinsics, padding_mode=
 def inverse_warp_rod1_rt2_coords(img, depth, ro1, rd1, c2w2, intrinsics, intrinsics_inv, scale=1., padding_mode='zeros'):
     """
     Inverse warp a source image to the target image plane.
-
     Args:
         img: the source image (where to sample pixels) -- [B, 3, H, W]
         depth: depth map of the target image -- [B, H, W]
@@ -495,6 +496,44 @@ def inverse_warp_rod1_rt2_coords(img, depth, ro1, rd1, c2w2, intrinsics, intrins
                                                     align_corners=True) 
     
     return projected_img, valid_mask
+
+def inverse_warp_rod1_rt2_coords_trt(img, depth, ro1, rd1, c2w2, scale=1., padding_mode='zeros'):
+    """
+    Inverse warp a source image to the target image plane. Fast versiion: we compute K*I'*[R|t] from the beginning
+
+    Args:
+        img: the source image (where to sample pixels) -- [B, 3, H, W]
+        depth: depth map of the target image -- [B, H, W]
+        pose: 6DoF pose parameters from target to source -- [B, 6]
+        intrinsics: camera intrinsic matrix -- [B, 3, 3]
+        intrinsics_inv: inverse of the intrinsic matrix -- [B, 3, 3]
+    Returns:
+        Source image warped to the target image plane
+    """
+    B, H, W = depth.shape
+    _, C, Hfull, Wfull = img.shape
+    # 1. Lift directly into 3D world coordinates [B, 3, H*W]
+    w = ro1 + rd1 * depth.view(B, 1, -1)
+    p2 = torch.bmm(c2w2, w)
+
+    p2[:, :2, :] /= (p2[:, 2:, :] + 1e-7)
+    X = p2[:, 0]
+    Y = p2[:, 1]
+    X_norm = 2 * X / (Wfull - 1) - 1  # Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1) [B, H*W]
+    Y_norm = 2 * Y / (Hfull - 1) - 1  # Idem [B, H*W]
+
+
+    time1.record()
+    pixel_coords = torch.stack([X_norm, Y_norm], dim=2)  # [B, H*W, 2]
+    src_pixel_coords = pixel_coords.view(B, H, W, 2)
+    
+    projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode=padding_mode,
+                                                align_corners=True) 
+    time2.record()
+    torch.cuda.synchronize(device=depth.device)
+    print('grid time:', time1.elapsed_time(time2))
+
+    return projected_img, None
 
 def inverse_warp_rod1_rt2_coords_feat(img, feat, depth, ro1, rd1, c2w2, intrinsics, intrinsics_inv, scale=1., padding_mode='zeros'):
     """
