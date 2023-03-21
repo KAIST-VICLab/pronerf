@@ -1,6 +1,6 @@
-expname = horns_refine_12samples_v2
-pretrain_path = logs_epi_RR/horns_sampler_e2e_donerf_12samples/500000.tar
-ft_path = logs_epi_RR/horns_refine_12samples_v2/440000.tar
+expname = horns_refine_8samples_v2
+pretrain_path = logs_epi_RR/horns_sampler_e2e_donerf_8samples/500000.tar
+ft_path = logs_epi_RR/horns_refine_8samples_v2/490000.tar
 datadir = ./data/nerf_llff_data/horns
 dataset_type = llff
 
@@ -10,7 +10,7 @@ k_ref = 1
 num_neighbor = 4
 
 N_rand = 12288
-N_samples = 12
+N_samples = 8
 N_importance = 0
 
 use_viewdirs = True

@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '7'
+gpu_n = '6'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -311,10 +311,6 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     psnrs = []
     ssims = []
     lpips_res = []
-    img2mse_np = lambda x, y : np.mean((x - y) ** 2)
-    mse2psnr_np = lambda x : -10. * np.log(x) / np.log([10.])
-    lpips_vgg = lpips.LPIPS(net="vgg").cuda()
-    lpips_vgg = lpips_vgg.eval()
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
@@ -346,14 +342,15 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             error = cv2.applyColorMap((error * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
 
             # ssims
-            ssim = img2ssim(rgb1.permute(2, 0, 1)[None], (gt_imgs[i]).permute(2, 0, 1)[None].cuda())
-            ssims.append(ssim.cpu().numpy())
+            ssim = img2ssim(rgb1.cpu(), (gt_imgs[i]).cpu())
+            ssims.append(ssim)
+            # ssim = img2ssim(rgb1.permute(2, 0, 1)[None], (gt_imgs[i]).permute(2, 0, 1)[None].cuda())
+            # ssims.append(ssim.cpu().numpy())
 
             # lpips
-            scaled_gt = (gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
-            scaled_pred = rgb1.permute(2, 0, 1)[None] * 2.0 - 1.0
-            lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
-            lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
+            lpips_val = rgb_lpips((gt_imgs[i]).cpu().numpy(), rgb1.cpu().numpy(), 'vgg', device)
+            lpips_res.append(lpips_val)
+
 
         if savedir is not None:
             rgb8 = to8b(rgbs1[-1])
@@ -965,14 +962,14 @@ def train():
         rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # [N, H, W, ro+rd+rgb, 3]
         rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # train images only
 
-        pretrained_depth = np.load(args.pretrain_depth_path)[:,:,:,None,None]
-        # # ! DEBUG
-        # pretrained_depth = np.stack([pretrained_depth[i] for i in range(pretrained_depth.shape[0]) if i!=20 and i!=21], 0)
-        pretrained_depth = np.repeat(pretrained_depth, 3, axis=-1)
+        # pretrained_depth = np.load(args.pretrain_depth_path)[:,:,:,None,None]
+        # # # ! DEBUG
+        # # pretrained_depth = np.stack([pretrained_depth[i] for i in range(pretrained_depth.shape[0]) if i!=20 and i!=21], 0)
+        # pretrained_depth = np.repeat(pretrained_depth, 3, axis=-1)
 
         # rays_img_id = torch.from_numpy((np.array([[i] for i in i_train]))[:, None, None,None,:]).repeat((1, H, W, 1, 3))
-        rays_rgb = np.concatenate([rays_rgb, pretrained_depth], 3)
-        rays_rgb = np.reshape(rays_rgb, [-1,4,3]) # [(N-1)*H*W, ro+rd+rgb + depth + img_id, 3]
+        # rays_rgb = np.concatenate([rays_rgb, pretrained_depth], 3)
+        rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # [(N-1)*H*W, ro+rd+rgb + depth + img_id, 3]
         rays_rgb = rays_rgb.astype(np.float32)
 
         # ! compute nearest id
@@ -1032,7 +1029,7 @@ def train():
         # Random over all images
         batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
         batch = torch.transpose(batch, 0, 1)
-        batch_rays, target_s, target_depth = batch[:2], batch[2], batch[3]
+        batch_rays, target_s = batch[:2], batch[2]
         batch_rays_nearest_id = rays_nearest_id[i_batch:i_batch+N_rand]
 
         i_batch += N_rand

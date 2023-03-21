@@ -1,5 +1,5 @@
 import os, sys
-gpu_n = '1'
+gpu_n = '6'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 import numpy as np
 import imageio
@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm, trange
 import lpips
-
+import cv2
 import matplotlib.pyplot as plt
 
 from run_nerf_helpers import *
@@ -176,7 +176,10 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             p = -10. * np.log10(np.mean(np.square(rgb.cpu().numpy() - gt_imgs[i])))
             psnrs.append(p)
             print(p)
-
+            error = (rgb.cpu().numpy() - gt_imgs[i])**2
+            # error = error.cpu().numpy()
+            error = (error - np.min(error)) / (max(np.max(error) - np.min(error), 1e-8))
+            error = cv2.applyColorMap((error * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
             # # ssims
             # ssim = img2ssim(rgb.permute(2, 0, 1)[None], torch.from_numpy(
             #     gt_imgs[i]).permute(2, 0, 1)[None].cuda())
@@ -193,10 +196,12 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             rgb8 = to8b(rgbs[-1])
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
+            filename = os.path.join(savedir, 'err{:03d}.png'.format(i))
+            imageio.imwrite(filename, error)
 
-            rgb8 = to8b(depths[-1]/np.max(depths[-1]))
-            filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
+            # rgb8 = to8b(depths[-1]/np.max(depths[-1]))
+            # filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
+            # imageio.imwrite(filename, rgb8)
 
             # rgb8 = to8b(acc_maps[-1]/np.max(acc_maps[-1]))
             # filename = os.path.join(savedir, 'acc_{:03d}.png'.format(i))
@@ -439,7 +444,7 @@ def render_rays(ray_batch,
         z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], N_importance, det=(perturb==0.), pytest=pytest)
         z_samples = z_samples.detach()
 
-        z_vals, _ = torch.sort(torch.cat([z_samples], -1), -1)
+        z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples + N_importance, 3]
 
         run_fn = network_fn if network_fine is None else network_fine
@@ -678,7 +683,7 @@ def train():
         ])
 
     if args.render_test:
-        render_poses = np.array(poses[i_train])
+        render_poses = np.array(poses[i_test])
 
     # Create log dir and copy the config file
     basedir = args.basedir
@@ -715,7 +720,7 @@ def train():
             if args.render_test:
                 # render_test switches to test poses
                 # images = torch.Tensor(images[i_test]).to(device)
-                images = images[i_train]
+                images = images[i_test]
             else:
                 # Default is smoother render_poses path
                 images = None

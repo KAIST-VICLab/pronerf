@@ -7,6 +7,7 @@ import torch.utils.model_zoo as model_zoo
 import torchvision.models as models
 import torch.nn.init as init
 from kornia.losses import ssim_loss as dssim
+from scipy import signal
 import math
 import re
 TINY_NUMBER = 1e-6  # float32 only has 7 decimal digits precision
@@ -17,12 +18,91 @@ img2mse = lambda x, y : torch.mean((x - y) ** 2)
 mse2psnr = lambda x : -10. * torch.log10(x)
 to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
 
-def img2ssim(image_pred, image_gt, reduction="mean"):
+__LPIPS__ = {}
+def init_lpips(net_name, device):
+    assert net_name in ['alex', 'vgg']
+    import lpips
+    print(f'init_lpips: lpips_{net_name}')
+    return lpips.LPIPS(net=net_name, version='0.1').eval().to(device)
+
+def rgb_lpips(np_gt, np_im, net_name, device):
+    if net_name not in __LPIPS__:
+        __LPIPS__[net_name] = init_lpips(net_name, device)
+    gt = torch.from_numpy(np_gt).permute([2, 0, 1]).contiguous().to(device)
+    im = torch.from_numpy(np_im).permute([2, 0, 1]).contiguous().to(device)
+    return __LPIPS__[net_name](gt, im, normalize=True).item()
+
+def img2ssim(img0, img1, max_val=1,
+             filter_size=11,
+             filter_sigma=1.5,
+             k1=0.01,
+             k2=0.03,
+             return_map=False):
+    # Modified from https://github.com/google/mipnerf/blob/16e73dfdb52044dcceb47cda5243a686391a6e0f/internal/math.py#L58
+    assert len(img0.shape) == 3
+    assert img0.shape[-1] == 3
+    assert img0.shape == img1.shape
+
+    # Construct a 1D Gaussian blur filter.
+    hw = filter_size // 2
+    shift = (2 * hw - filter_size + 1) / 2
+    f_i = ((np.arange(filter_size) - hw + shift) / filter_sigma)**2
+    filt = np.exp(-0.5 * f_i)
+    filt /= np.sum(filt)
+
+    # Blur in x and y (faster than the 2D convolution).
+    def convolve2d(z, f):
+        return signal.convolve2d(z, f, mode='valid')
+
+    filt_fn = lambda z: np.stack([
+        convolve2d(convolve2d(z[...,i], filt[:, None]), filt[None, :])
+        for i in range(z.shape[-1])], -1)
+    mu0 = filt_fn(img0)
+    mu1 = filt_fn(img1)
+    mu00 = mu0 * mu0
+    mu11 = mu1 * mu1
+    mu01 = mu0 * mu1
+    sigma00 = filt_fn(img0**2) - mu00
+    sigma11 = filt_fn(img1**2) - mu11
+    sigma01 = filt_fn(img0 * img1) - mu01
+
+    # Clip the variances and covariances to valid values.
+    # Variance must be non-negative:
+    sigma00 = np.maximum(0., sigma00)
+    sigma11 = np.maximum(0., sigma11)
+    sigma01 = np.sign(sigma01) * np.minimum(
+        np.sqrt(sigma00 * sigma11), np.abs(sigma01))
+    c1 = (k1 * max_val)**2
+    c2 = (k2 * max_val)**2
+    numer = (2 * mu01 + c1) * (2 * sigma01 + c2)
+    denom = (mu00 + mu11 + c1) * (sigma00 + sigma11 + c2)
+    ssim_map = numer / denom
+    ssim = np.mean(ssim_map)
+    return ssim_map if return_map else ssim
+
+# def img2ssim(image_pred, image_gt, reduction="mean"):
+#     """
+#     image_pred and image_gt: (1, 3, H, W)
+#     """
+#     dssim_ = dssim(image_pred, image_gt, 3, reduction=reduction)  # dissimilarity in [0, 1]
+#     return 1 - 2 * dssim_  # in [-1, 1]
+
+def batched_angular_dist_rot_matrix(R1, R2):
     """
-    image_pred and image_gt: (1, 3, H, W)
+    calculate the angular distance between two rotation matrices (batched)
+    :param R1: the first rotation matrix [N, 3, 3]
+    :param R2: the second rotation matrix [N, 3, 3]
+    :return: angular distance in radiance [N, ]
     """
-    dssim_ = dssim(image_pred, image_gt, 3, reduction=reduction)  # dissimilarity in [0, 1]
-    return 1 - 2 * dssim_  # in [-1, 1]
+    TINY_NUMBER = 1e-6
+    assert R1.shape[-1] == 3 and R2.shape[-1] == 3 and R1.shape[-2] == 3 and R2.shape[-2] == 3
+    return np.arccos(
+        np.clip(
+            (np.trace(np.matmul(R2.transpose(0, 2, 1), R1), axis1=1, axis2=2) - 1) / 2.0,
+            a_min=-1 + TINY_NUMBER,
+            a_max=1 - TINY_NUMBER,
+        )
+    )
 
 def angular_dist_between_2_vectors(vec1, vec2):
     vec1_unit = vec1 / (np.linalg.norm(vec1, axis=1, keepdims=True) + TINY_NUMBER)
@@ -53,6 +133,105 @@ def compute_angle(xyz, query_camera, train_cameras):
     ray_diff_dot = torch.sum(ray2tar_pose.unsqueeze(2) * ray2train_pose, dim=-1, keepdim=True)
     ray_diff = torch.cat([ray_diff_direction, ray_diff_dot], dim=-1) # nrays, nsamples, nviews, 4
     return ray_diff
+
+class BaseContract(nn.Module):
+    def __init__(
+        self,
+        **kwargs
+    ):
+        super().__init__()
+
+        self.use_dataset_bounds = True
+        self.contract_samples = True
+
+    def inverse_contract_distance(self, distance):
+        return distance
+
+    def contract_distance(self, distance):
+        return distance
+
+    def contract_points(self, points):
+        return points
+
+    def inverse_contract_points(self, contract_points):
+        contract_distance = torch.norm(contract_points, dim=-1, keepdim=True)
+        distance = self.inverse_contract_distance(contract_distance)
+        return (contract_points / contract_distance) * distance
+
+    def contract_points_and_distance(self, rays_o, points, distance):
+        # Contract
+        rays_o = self.contract_points(rays_o)
+        points = self.contract_points(points)
+        distance = torch.norm(points - rays_o[..., None, :], dim=-1, keepdim=True)
+
+        # Return
+        return points, distance 
+       
+class MIPNeRFContract(BaseContract):
+    def __init__(
+        self,
+        contract_end_radius,
+        **kwargs
+    ):
+        super().__init__()
+
+
+        self.contract_start_radius = 2.0
+        self.contract_end_radius = contract_end_radius
+
+
+        self.contract_start_distance = self.contract_start_radius
+        self.contract_end_distance = self.contract_end_radius
+
+    def inverse_contract_distance(self, distance):
+        # t varies linearly in disparity
+        inverse_contract_end_distance = self.contract_start_distance / self.contract_end_distance
+        scale_factor = 1.0 / (1.0 - inverse_contract_end_distance)
+
+        # Inverse distance
+        distance = distance.clamp(-2.0, 2.0)
+        t = (2.0 - torch.abs(distance))
+        inverse_distance = t / scale_factor + inverse_contract_end_distance
+
+        return torch.where(
+            torch.abs(distance) < 1,
+            distance,
+            torch.sign(distance) * ( 1.0 / inverse_distance )
+        ) * self.contract_start_distance
+
+    def contract_distance(self, distance):
+        # Re-scale distance
+        distance = distance / self.contract_start_distance
+        inverse_distance = 1.0 / torch.abs(distance)
+
+        # t varies linearly in disparity
+        inverse_contract_end_distance = self.contract_start_distance / self.contract_end_distance
+        scale_factor = 1.0 / (1.0 - inverse_contract_end_distance)
+        t = (inverse_distance - inverse_contract_end_distance) * scale_factor
+
+        distance = torch.where(
+            torch.abs(distance) < 1.0,
+            distance,
+            torch.sign(distance) * ( 2.0 - t ),
+        )
+
+        return distance
+
+    def contract_points(self, points):
+        points = points / self.contract_start_radius
+        distance = torch.norm(points, dim=-1, keepdim=True)
+
+        # t varies linearly in disparity
+        inverse_distance = 1.0 / torch.abs(distance)
+        inverse_contract_end_radius = self.contract_start_radius / self.contract_end_radius
+        scale_factor = 1.0 / (1.0 - inverse_contract_end_radius)
+        t = (inverse_distance - inverse_contract_end_radius) * scale_factor
+
+        return torch.where(
+            distance < 1,
+            points,
+            (points / distance) * ( 2.0 - t )
+        )
 
 
 class Pluecker(nn.Module):
@@ -983,11 +1162,13 @@ class MinMaxRay_NetEpiNPE0(nn.Module):
 
     def forward(self, x, epi=None, chunk=1024*64):
         n_rays = x.shape[0]
+        
         if epi is not None:
             x = torch.cat((x.view(-1, self.input_ch),  epi.reshape(-1, self.input_epi)), 1)
         else:
             x = x.view(-1, self.input_ch)
 
+        breakpoint()
         if x.shape[0] > chunk:
             x_npe = torch.cat([self.npe(x[i:i + chunk]) for i in range(0, x.shape[0], chunk)], 0)
         else:

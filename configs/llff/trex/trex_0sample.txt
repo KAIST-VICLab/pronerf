@@ -1,6 +1,5 @@
 expname = trex_sampler_e2e_donerf_0samples
 datadir = ./data/nerf_llff_data/trex
-ft_path = logs_epi_RR/trex_sampler_e2e_donerf_0samples/500000.tar
 dataset_type = llff
 
 factor = 4

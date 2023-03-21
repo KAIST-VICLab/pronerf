@@ -85,17 +85,17 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     sfx = ''
     if factor is not None:
         sfx = '_{}'.format(factor)
-        # _minify(basedir, factors=[factor])
+        _minify(basedir, factors=[factor])
         factor = factor
     elif height is not None:
         factor = sh[0] / float(height)
         width = int(sh[1] / factor)
-        # _minify(basedir, resolutions=[[height, width]])
+        _minify(basedir, resolutions=[[height, width]])
         sfx = '_{}x{}'.format(width, height)
     elif width is not None:
         factor = sh[1] / float(width)
         height = int(sh[0] / factor)
-        # _minify(basedir, resolutions=[[height, width]])
+        _minify(basedir, resolutions=[[height, width]])
         sfx = '_{}x{}'.format(width, height)
     else:
         factor = 1

@@ -1,6 +1,5 @@
 expname = fortress_sampler_e2e_donerf_0samples
 datadir = ./data/nerf_llff_data/fortress
-ft_path = logs_epi_RR/fortress_sampler_e2e_donerf_0samples/450000.tar
 dataset_type = llff
 
 factor = 4

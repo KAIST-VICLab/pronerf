@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 from run_nerf_helpers import *
 from trt_infer_v2 import *
 
-from load_llff import load_llff_data
+from load_llff import load_llff_data, load_llff_data_infer
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
@@ -295,6 +295,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
         neighbor_images = torch.Tensor(render_kwargs['images'])[ref_nos].to(device)
         ref_pose = render_kwargs['poses'][ref_nos]
+
         trans_ones = torch.eye(3).to(device)
         trans_ones[1,1] = -1
         trans_ones[2,2] = -1
@@ -743,7 +744,7 @@ def train():
     # Load data
     K = None
     if args.dataset_type == 'llff':
-        images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+        images, poses, bds, render_poses, i_test, i_ref = load_llff_data_infer(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
         hwf = poses[0,:3,-1]
@@ -861,8 +862,13 @@ def train():
     # update train val id
     K_ten = torch.Tensor(K.copy()).to(device)
     render_kwargs_test['i_train'] = i_train
-    render_kwargs_test['images'] = images[i_train]
-    render_kwargs_test['poses'] = poses[i_train]
+
+    # render_kwargs_test['images'] = images[i_train]
+    # render_kwargs_test['poses'] = poses[i_train]
+
+    render_kwargs_test['images'] = images[i_ref]
+    render_kwargs_test['poses'] = poses[i_ref]
+
     render_kwargs_test['ref_K'] = K_ten
 
     testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(

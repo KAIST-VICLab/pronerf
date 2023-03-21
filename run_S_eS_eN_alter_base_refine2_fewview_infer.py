@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '1'
+gpu_n = '6'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -16,13 +16,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm, trange
 import inverse_warp
-# import lpips
+import lpips
 
 import matplotlib.pyplot as plt
 
 from run_nerf_helpers import *
 
-from load_llff import load_llff_data
+from load_llff import load_llff_data, load_llff_data_infer
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
@@ -308,11 +308,12 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     rgbs0 = []
     rgbs1 = []
     depths = []
+    depths0 = []
+    depths00 = []
+    depth_diffs = []
     psnrs = []
     ssims = []
     lpips_res = []
-    img2mse_np = lambda x, y : np.mean((x - y) ** 2)
-    mse2psnr_np = lambda x : -10. * np.log(x) / np.log([10.])
     # lpips_vgg = lpips.LPIPS(net="vgg").cuda()
     # lpips_vgg = lpips_vgg.eval()
 
@@ -334,11 +335,12 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         rgbs0.append(rgb0.cpu().numpy())
         rgbs1.append(rgb1.cpu().numpy())
         depths.append(depth_map.cpu().numpy())
+        depths0.append(extras['z_vals'].cpu().numpy())
+        depths00.append(extras['z_vals0'].cpu().numpy())
+        depth_diffs.append(torch.abs(extras['z_vals0'] - extras['z_vals']).cpu().numpy())
 
         if gt_imgs is not None and render_factor == 0:
             p = mse2psnr(img2mse(rgb1, gt_imgs[i]))
-            # p = -10. * np.log10(np.mean(np.square(rgb1.cpu().numpy() - gt_imgs[i].cpu().numpy())))
-            # p = mse2psnr_np(img2mse_np(debug_rgb[i], gt_imgs[i].cpu().numpy()))
             psnrs.append(p)
             error = (rgb1 - gt_imgs[i])**2
             error = error.cpu().numpy()
@@ -346,10 +348,15 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             error = cv2.applyColorMap((error * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
 
             # ssims
+            ssim = img2ssim(rgb1.cpu(), (gt_imgs[i]).cpu())
+            ssims.append(ssim)
             # ssim = img2ssim(rgb1.permute(2, 0, 1)[None], (gt_imgs[i]).permute(2, 0, 1)[None].cuda())
             # ssims.append(ssim.cpu().numpy())
 
             # lpips
+            lpips_val = rgb_lpips((gt_imgs[i]).cpu().numpy(), rgb1.cpu().numpy(), 'vgg', device)
+            lpips_res.append(lpips_val)
+
             # scaled_gt = (gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
             # scaled_pred = rgb1.permute(2, 0, 1)[None] * 2.0 - 1.0
             # lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
@@ -369,6 +376,18 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
             rgb8 = to8b(depths[-1]/np.max(depths[-1]))
             filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
+            imageio.imwrite(filename, rgb8)
+
+            rgb8 = to8b(depths0[-1]/np.max(depths0[-1]))
+            filename = os.path.join(savedir, 'depth0_{:03d}.png'.format(i))
+            imageio.imwrite(filename, rgb8)
+
+            rgb8 = to8b(depths00[-1]/np.max(depths00[-1]))
+            filename = os.path.join(savedir, 'depth00_{:03d}.png'.format(i))
+            imageio.imwrite(filename, rgb8)
+
+            rgb8 = cv2.applyColorMap(((depth_diffs[-1] - np.min(depth_diffs[-1]))/(np.max(depth_diffs[-1]) - np.min(depth_diffs[-1])) * 255).astype(np.uint8), cv2.COLORMAP_JET)
+            filename = os.path.join(savedir, 'depthdiff_{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
     rgbs0 = np.stack(rgbs0, 0)
@@ -665,14 +684,10 @@ def render_rays(ray_batch, or_ray_batch,
         rel_cam_dist = torch.sum((target_pose[:,None,:, 3] - ref_poses[:, :, 3]) ** 2, 2) ** (1 / 2)
         _, rel_cam_idx = torch.sort(rel_cam_dist.detach(), dim=1)
 
-        if randomize:
-            ref_nos = rel_cam_idx[:,1:]
-            # Random but keep order, ! remove the first pose
-            order_idx = torch.from_numpy(np.array(sorted(random.sample(range(ref_nos.shape[1]), num_neighbor)))).to(device)
-            ref_nos = torch.gather(ref_nos, dim=1, index=order_idx[None].repeat(N_rays,1).long())
-        else:
-            # Nearest, testing do not remove first pose
-            ref_nos = rel_cam_idx[:, 0:num_neighbor]
+
+
+        # Nearest, testing do not remove first pose
+        ref_nos = rel_cam_idx
 
         ref_rgb = (ref_rgbs.permute(0, 3, 1, 2))
         ref_rgb = torch.repeat_interleave(ref_rgb, repeats=num_pts, dim=0)
@@ -749,7 +764,7 @@ def render_rays(ray_batch, or_ray_batch,
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, epi_z_vals, rays_d, raw_noise_std, white_bkgd,
                                                                  pytest=pytest, mm_density_add=mm_density_add,
                                                                  mm_density_mul=mm_density_mul, iter=iter)
-    ret = {'rgb_map0': refine_rgb, 'rgb_map1': rgb_map, 'depth_map': depth_map, 'mm_rgb': mm_rgb}
+    ret = {'rgb_map0': refine_rgb, 'rgb_map1': rgb_map, 'depth_map': depth_map, 'mm_rgb': mm_rgb, 'z_vals': epi_z_vals.mean(dim=-1), 'z_vals0': depth_values.mean(dim=-1)}
     return ret
 
 
@@ -761,7 +776,10 @@ def train():
     # Load data
     K = None
     if args.dataset_type == 'llff':
-        images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+        # images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+        #                                                           recenter=True, bd_factor=.75,
+        #                                                           spherify=args.spherify)
+        images, poses, bds, render_poses, i_test, i_ref = load_llff_data_infer(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
         hwf = poses[0,:3,-1]
@@ -940,7 +958,7 @@ def train():
 
     N_iters = 500000 + 1
     print('Begin')
-    print('TRAIN views are', i_train)
+    print('TRAIN views are', i_train, len(i_train))
     print('TEST views are', i_test)
     print('VAL views are', i_val)
 
@@ -948,10 +966,16 @@ def train():
     K_ten = torch.Tensor(K.copy()).to(device)
     render_kwargs_train['i_train'] = i_train
     render_kwargs_test['i_train'] = i_train
-    render_kwargs_train['images'] = images[i_train]
-    render_kwargs_test['images'] = images[i_train]
-    render_kwargs_train['poses'] = poses[i_train]
-    render_kwargs_test['poses'] = poses[i_train]
+    # render_kwargs_train['images'] = images[i_train]
+    # render_kwargs_test['images'] = images[i_train]
+    # render_kwargs_train['poses'] = poses[i_train]
+    # render_kwargs_test['poses'] = poses[i_train]
+
+    render_kwargs_train['images'] = images[i_ref]
+    render_kwargs_test['images'] = images[i_ref]
+    render_kwargs_train['poses'] = poses[i_ref]
+    render_kwargs_test['poses'] = poses[i_ref]
+
     render_kwargs_train['ref_K'] = K_ten
     render_kwargs_test['ref_K'] = K_ten
 
@@ -974,82 +998,82 @@ def train():
             rays_nearest_id = rays_nearest_id[rand_idx]
             i_batch = 0
 
-        #####  Core optimization loop  #####
-        render_kwargs_train['iter'] = i
-        render_kwargs_test['iter'] = i
-        render_kwargs_test['train_nerf'] = False
-        render_kwargs_train['batch_rays_nearest_id'] = batch_rays_nearest_id
-        render_kwargs_train['train_nerf'] = True
+        # #####  Core optimization loop  #####
+        # render_kwargs_train['iter'] = i
+        # render_kwargs_test['iter'] = i
+        # render_kwargs_test['train_nerf'] = False
+        # render_kwargs_train['batch_rays_nearest_id'] = batch_rays_nearest_id
+        # render_kwargs_train['train_nerf'] = True
 
-        # ! train nerf
+        # # ! train nerf
+        # # rgb0, rgb1, depth_map, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+        # #                                         verbose=i < 10, retraw=True,
+        # #                                         **render_kwargs_train)
+        # #
+        # # optimizer_nerf.zero_grad()
+        # # img_loss = img2mse(rgb1, target_s)
+        # # loss = img_loss
+        # # # psnr = mse2psnr(img_loss)
+        # # loss.backward()
+        # # optimizer_nerf.step()
+
+        # # ! train sampling net
+        # render_kwargs_train['train_nerf'] = True
         # rgb0, rgb1, depth_map, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
         #                                         verbose=i < 10, retraw=True,
         #                                         **render_kwargs_train)
-        #
-        # optimizer_nerf.zero_grad()
+
+        # optimizer.zero_grad()
         # img_loss = img2mse(rgb1, target_s)
         # loss = img_loss
-        # # psnr = mse2psnr(img_loss)
+        # if args.a_mmrgb > 0:
+        #     rgb0_loss = img2mse(rgb0, target_s)
+        #     mm_rgb_loss = img2mse(extras['mm_rgb'], target_s)
+        #     loss = loss + args.a_mmrgb * (rgb0_loss + mm_rgb_loss)
+
+        # psnr = mse2psnr(img_loss)
         # loss.backward()
-        # optimizer_nerf.step()
+        # optimizer.step()
 
-        # ! train sampling net
-        render_kwargs_train['train_nerf'] = True
-        rgb0, rgb1, depth_map, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
-                                                verbose=i < 10, retraw=True,
-                                                **render_kwargs_train)
+        # # NOTE: IMPORTANT!
+        # ###   update learning rate   ###
+        # decay_rate = 0.1
+        # decay_steps = args.lrate_decay * 1000
+        # new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
+        # for param_group in optimizer.param_groups:
+        #     param_group['lr'] = new_lrate
+        # for param_group in optimizer_nerf.param_groups:
+        #     param_group['lr'] = new_lrate
+        # # ################################
 
-        optimizer.zero_grad()
-        img_loss = img2mse(rgb1, target_s)
-        loss = img_loss
-        if args.a_mmrgb > 0:
-            rgb0_loss = img2mse(rgb0, target_s)
-            mm_rgb_loss = img2mse(extras['mm_rgb'], target_s)
-            loss = loss + args.a_mmrgb * (rgb0_loss + mm_rgb_loss)
+        # dt = time.time()-time0
+        # # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
+        # #####           end            #####
 
-        psnr = mse2psnr(img_loss)
-        loss.backward()
-        optimizer.step()
-
-        # NOTE: IMPORTANT!
-        ###   update learning rate   ###
-        decay_rate = 0.1
-        decay_steps = args.lrate_decay * 1000
-        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = new_lrate
-        for param_group in optimizer_nerf.param_groups:
-            param_group['lr'] = new_lrate
-        # ################################
-
-        dt = time.time()-time0
-        # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
-        #####           end            #####
-
-        # Rest is logging
-        if i % args.i_weights == 0:
-            # print(f'New learning rate: {new_lrate}')
-            path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
-            if render_kwargs_train['network_fine'] is not None:
-                torch.save({
-                    'global_step': global_step,
-                    'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                    'mmr_network_fn_state_dict': render_kwargs_train['min_max_ray_net'].state_dict(),
-                    'refine_net_state_dict': render_kwargs_train['refine_net'].state_dict(),
-                    'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'optimizer_nerf_state_dict': optimizer_nerf.state_dict(),
-                }, path)
-                print('Saved checkpoints at', path)
-            else:
-                torch.save({
-                    'global_step': global_step,
-                    'mmr_network_fn_state_dict': render_kwargs_train['min_max_ray_net'].state_dict(),
-                    'refine_net_state_dict': render_kwargs_train['refine_net'].state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'optimizer_nerf_state_dict': optimizer_nerf.state_dict(),
-                }, path)
-                print('Saved checkpoints at', path)
+        # # Rest is logging
+        # if i % args.i_weights == 0 and (not args.render_test) :
+        #     # print(f'New learning rate: {new_lrate}')
+        #     path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
+        #     if render_kwargs_train['network_fine'] is not None:
+        #         torch.save({
+        #             'global_step': global_step,
+        #             'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
+        #             'mmr_network_fn_state_dict': render_kwargs_train['min_max_ray_net'].state_dict(),
+        #             'refine_net_state_dict': render_kwargs_train['refine_net'].state_dict(),
+        #             'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
+        #             'optimizer_state_dict': optimizer.state_dict(),
+        #             'optimizer_nerf_state_dict': optimizer_nerf.state_dict(),
+        #         }, path)
+        #         print('Saved checkpoints at', path)
+        #     else:
+        #         torch.save({
+        #             'global_step': global_step,
+        #             'mmr_network_fn_state_dict': render_kwargs_train['min_max_ray_net'].state_dict(),
+        #             'refine_net_state_dict': render_kwargs_train['refine_net'].state_dict(),
+        #             'optimizer_state_dict': optimizer.state_dict(),
+        #             'optimizer_nerf_state_dict': optimizer_nerf.state_dict(),
+        #         }, path)
+        #         print('Saved checkpoints at', path)
 
         # if (i % args.i_video == 0 and i > 0) or (args.render_only):
         #     # Turn on testing mode

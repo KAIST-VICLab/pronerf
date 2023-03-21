@@ -1,6 +1,5 @@
 expname = horns_sampler_e2e_donerf_0samples
 datadir = ./data/nerf_llff_data/horns
-ft_path = logs_epi_RR/horns_sampler_e2e_donerf_0samples/480000.tar
 dataset_type = llff
 
 factor = 4

@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '1'
+gpu_n = '4'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -346,14 +346,14 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             error = cv2.applyColorMap((error * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
 
             # ssims
-            ssim = img2ssim(rgb1.permute(2, 0, 1)[None], (gt_imgs[i]).permute(2, 0, 1)[None].cuda())
-            ssims.append(ssim.cpu().numpy())
+            ssim = img2ssim(rgb1.cpu(), (gt_imgs[i]).cpu())
+            ssims.append(ssim)
+            # ssim = img2ssim(rgb1.permute(2, 0, 1)[None], (gt_imgs[i]).permute(2, 0, 1)[None].cuda())
+            # ssims.append(ssim.cpu().numpy())
 
             # lpips
-            scaled_gt = (gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
-            scaled_pred = rgb1.permute(2, 0, 1)[None] * 2.0 - 1.0
-            lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
-            lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
+            lpips_val = rgb_lpips((gt_imgs[i]).cpu().numpy(), rgb1.cpu().numpy(), 'vgg', device)
+            lpips_res.append(lpips_val)
 
         if savedir is not None:
             rgb8 = to8b(rgbs1[-1])
@@ -575,8 +575,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
             noise = torch.Tensor(noise)
 
-    # if mm_density_add is not None:
-    if False:
+    if mm_density_add is not None:
         alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
         if True:
             alpha = alpha*torch.relu(mm_density_mul)

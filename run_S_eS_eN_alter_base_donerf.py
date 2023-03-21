@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '2'
+gpu_n = '5'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -42,7 +42,7 @@ def config_parser():
                         help='config file path')
     parser.add_argument("--expname", type=str,
                         help='experiment name')
-    parser.add_argument("--basedir", type=str, default='./logs_epi_RR/',
+    parser.add_argument("--basedir", type=str, default='./logs_donerf/',
                         help='where to store ckpts and logs')
     parser.add_argument("--datadir", type=str, default='./data/llff/fern',
                         help='input data directory')
@@ -418,9 +418,8 @@ def create_nerf(args):
                           input_ch_epi=3*args.num_neighbor, output_ch=output_ch,
                           skips=skips, input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
     else:
-        model = NeRF(D=args.netdepth, W=args.netwidth,
-                     input_ch=input_ch, output_ch=output_ch, skips=skips,
-                     input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
+        model = DoNeRF(D=args.netdepth, W=args.netwidth,
+                     n_in=input_ch + input_ch_views, n_out=output_ch, skip='auto')
     model.to(device)
     # model.load_state_dict(pretrain_ckpt['network_fn_state_dict'])
     grad_vars.append({'params': model.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
@@ -436,15 +435,15 @@ def create_nerf(args):
     s_grad_vars.append({'params': model.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     model_mmray = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
-                                      input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
-                                      (6) * args.N_point_ray_enc,
-                                      output_ch=3*args.N_samples+3, skips=args.mmnetskips)
+                                input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
+                                6 * args.N_point_ray_enc,
+                                output_ch=3 * args.N_samples + 3, skips=args.mmnetskips)
     s_grad_vars.append({'params': model_mmray.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     model_refine = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
-                                    input_ch=2 + input_ch * args.N_samples if args.mm_emb else
-                                    (3*args.num_neighbor) * args.N_samples + 6*(args.N_samples+1),
-                                    output_ch=args.N_samples + 3*args.N_samples + 3, skips=args.mmnetskips)
+                                input_ch=input_ch * args.N_samples if args.mm_emb else
+                                6 * (0+args.N_samples) + 3 * args.num_neighbor * args.N_samples,
+                                output_ch=4 * args.N_samples + 3, skips=args.mmnetskips)
     s_grad_vars.append({'params': model_refine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     # Create optimizers
@@ -767,9 +766,8 @@ def render_rays(ray_batch, or_ray_batch,
     #     aux_rgb_map, _, _, _, _ = raw2outputs(aux_raw, depth_values, rays_d, raw_noise_std, white_bkgd, pytest=pytest,
     #                                           iter=iter)
 
-    plucker_embed = kwargs['embed_rays'](torch.cat([rays_o[:,None], epi_pts], dim=1),
-                                         rays_d[:, None, :].repeat(1, num_pts + 1, 1)) # nump_pts + origin
-    plucker_embed = plucker_embed.view(-1, num_pts + 1, 6)
+    plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:, None, :].repeat(1, num_pts, 1)) # nump_pts + origin
+    plucker_embed = plucker_embed.view(-1, num_pts, 6)
     # plucker_embed = torch.cat((rays_o[:,None], rays_d[:,None], epi_pts), 1).view(-1, 6 + num_pts * 3)
     net_input = torch.cat((plucker_embed.view(N_rays, -1), epi_features.view(N_rays, -1)), -1)
 
@@ -1120,14 +1118,6 @@ def train():
             aux_rgb_loss = 0#img2mse(extras['aux_rgb'], target_s)
 
             sigma_loss = 0
-            # if i < 30000:
-            #     sigma_loss = (1e-5) * (-(extras['sigma1']).mean())  # sigma loss for density
-            #     # sigma_loss += (1e-5) * (-(extras['sigma0']).mean())  # sigma loss for density
-            # elif i > 130000:
-            #     sigma_loss = 0
-            # else:
-            #     sigma_loss = (1e-6) * (-(extras['sigma1']).mean())  # sigma loss for density
-            #     # sigma_loss += (1e-6) * (-(extras['sigma0']).mean())  # sigma loss for density
 
             loss = img_loss + rgb0_loss + sigma_loss + mm_rgb_loss + aux_rgb_loss
             psnr = mse2psnr(img_loss)
@@ -1200,10 +1190,10 @@ def train():
                 testsavedir = os.path.join(
                     basedir, expname, 'testset_{:06d}'.format(i))
             os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', poses[i_test].shape)
+            print('test poses shape', poses[i_val].shape)
             with torch.no_grad():
-                render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test,
-                            gt_imgs=images[i_test], savedir=testsavedir)
+                render_path(torch.Tensor(poses[i_val]).to(device), hwf, K, args.chunk, render_kwargs_test,
+                            gt_imgs=images[i_val], savedir=testsavedir)
             print('Saved test set')
 
         if i % args.i_print == 0:

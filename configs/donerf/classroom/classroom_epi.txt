@@ -1,7 +1,5 @@
-expname = classroom_sampler_8samples
+expname = classroom_sampler_12samples
 datadir = classroom
-pretrain_depth_path = pretrained_depths/pretrained_depth_classroom.npy
-pretrain_path = logs/classroom_reproduce/300000.tar
 dataset_type = donerf
 
 factor = 4
@@ -9,7 +7,7 @@ llffhold = 8
 k_ref = 1
 
 N_rand = 12288
-N_samples = 8
+N_samples = 12
 N_importance = 0
 
 use_viewdirs = True

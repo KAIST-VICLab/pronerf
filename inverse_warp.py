@@ -459,7 +459,7 @@ def inverse_warp_rod1_rt2_coords(img, depth, ro1, rd1, c2w2, intrinsics, intrins
 
     # 4. Get pixel coordinates in c2: p2 = Kc2 / c2[z]
     z = torch.abs(c2[:, 2, None, :])
-    c2_ = c2 / z
+    c2_ = c2 / (z+ 1e-6)
     c2_[:, 2, :] = 1
     c2_[:, 1, :] *= -1
     p2 = torch.bmm(intrinsics, c2_)
@@ -469,8 +469,8 @@ def inverse_warp_rod1_rt2_coords(img, depth, ro1, rd1, c2w2, intrinsics, intrins
     X_norm = 2 * X / (Wfull - 1) - 1  # Normalized, -1 if on extreme left, 1 if on extreme right (x = w-1) [B, H*W]
     Y_norm = 2 * Y / (Hfull - 1) - 1  # Idem [B, H*W]
 
-    unnorm_pixel_coords = torch.stack([X, Y], dim=2)
-    valid_mask = inbound(unnorm_pixel_coords, h=Hfull, w = Wfull).view(B,H,W)
+    # unnorm_pixel_coords = torch.stack([X, Y], dim=2)
+    # valid_mask = inbound(unnorm_pixel_coords, h=Hfull, w = Wfull).view(B,H,W)
 
     if padding_mode == 'zeros':
         X_mask = ((X_norm > 1) + (X_norm < -1)).detach()
@@ -495,7 +495,7 @@ def inverse_warp_rod1_rt2_coords(img, depth, ro1, rd1, c2w2, intrinsics, intrins
         projected_img = torch.nn.functional.grid_sample(img, src_pixel_coords, padding_mode=padding_mode,
                                                     align_corners=True) 
     
-    return projected_img, valid_mask
+    return projected_img, None
 
 def inverse_warp_rod1_rt2_coords_trt(img, depth, ro1, rd1, c2w2, scale=1., padding_mode='zeros'):
     """

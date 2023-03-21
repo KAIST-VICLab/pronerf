@@ -1,6 +1,5 @@
 expname = leaves_sampler_e2e_donerf_0samples
 datadir = ./data/nerf_llff_data/leaves
-ft_path = logs_epi_RR/leaves_sampler_e2e_donerf_0samples/470000.tar
 dataset_type = llff
 
 factor = 4
