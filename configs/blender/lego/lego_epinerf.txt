@@ -1,4 +1,4 @@
-expname = lego_sampler_12samples_12nn_2episampler_nograd
+expname = lego_sampler_12samples_12nn_spherical_sortraypoint
 datadir = ./data/nerf_synthetic/lego
 dataset_type = blender
 

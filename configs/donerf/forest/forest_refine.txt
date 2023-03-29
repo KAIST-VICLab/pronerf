@@ -1,5 +1,5 @@
-expname = forest_refine_8samples
-pretrain_path = logs_donerf/forest_sampler_8samples/500000.tar
+expname = forest_refine_16samples
+pretrain_path = logs_donerf/forest_sampler_16samples/500000.tar
 datadir = forest
 dataset_type = donerf
 
@@ -9,7 +9,7 @@ k_ref = 1
 num_neighbor = 4
 
 N_rand = 12288
-N_samples = 8
+N_samples = 16
 N_importance = 0
 
 use_viewdirs = True

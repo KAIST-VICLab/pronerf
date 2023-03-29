@@ -1,7 +1,6 @@
-expname = orchids_refine_12samples_v2_2
-pretrain_path = logs_epi_RR/orchids_sampler_e2e_donerf_12samples/500000.tar
+expname = orchids_refine_12samples_v2_newplucker
+pretrain_path = logs_epi_RR/orchids_sampler_e2e_donerf_12samples_newplucker/500000.tar
 datadir = ./data/nerf_llff_data/orchids
-ft_path = logs_epi_RR/orchids_refine_12samples_v2/230000.tar
 dataset_type = llff
 
 factor = 4

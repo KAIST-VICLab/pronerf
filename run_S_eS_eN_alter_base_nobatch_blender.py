@@ -1,6 +1,6 @@
 import os, sys
 
-gpu_n = '5'
+gpu_n = '4'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 
@@ -139,6 +139,10 @@ def config_parser():
                         help='set to render synthetic data on a white bkgd (always use for dvoxels)')
     parser.add_argument("--half_res", action='store_true',
                         help='load blender synthetic data at 400x400 instead of 800x800')
+    parser.add_argument("--precrop_iters", type=int, default=500,
+                        help='number of steps to train on central crops')
+    parser.add_argument("--precrop_frac", type=float,
+                        default=.5, help='fraction of img taken for central crops') 
 
     ## llff flags
     parser.add_argument("--factor", type=int, default=8,
@@ -395,7 +399,9 @@ def render_path(render_poses, hwf, K, k_ref, N_n, chunk, ref_poses, ref_rgbs, re
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
+    embed_rays = Pluecker()
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
+    contract_embed = MIPNeRFContract(contract_start_radius=1.0)
 
     grad_vars = []
     input_ch_views = 0
@@ -500,7 +506,9 @@ def create_nerf(args):
         'refine_net': model_refine,
         'N_point_ray_enc': args.N_point_ray_enc,
         'embed_fn': embed_fn if args.mm_emb else None,
-        'randomize':True
+        'randomize':True,
+        'contract': contract_embed,
+        'embed_rays' : embed_rays
     }
 
     # NDC only good for LLFF-style forward facing data
@@ -525,6 +533,11 @@ def compute_query_points_from_rays(
         N_point_ray_enc,
         randomize = True
 ) -> (torch.Tensor, torch.Tensor):
+    
+    # disp_step = torch.linspace(0., 1., N_point_ray_enc).to(ray_origins)
+    # disp_values = (1/far_thresh)*disp_step + (1/near_thresh)*(1-disp_step)
+    # depth_values = 1/disp_values
+
     depth_values = torch.linspace(near_thresh, far_thresh, N_point_ray_enc).to(ray_origins)
     depth_values = depth_values.unsqueeze(0)
     if randomize is True:
@@ -613,7 +626,8 @@ def render_rays(ray_batch, or_ray_batch, target_pose, ref_poses, ref_rgbs, Hfull
                 train_sampler=False,
                 verbose=False,
                 pytest=False,
-                grad_mask = None):
+                grad_mask = None,
+                **kwargs):
     """Volumetric rendering.
     Args:
       ray_batch: array of shape [batch_size, ...]. All information necessary
@@ -653,6 +667,7 @@ def render_rays(ray_batch, or_ray_batch, target_pose, ref_poses, ref_rgbs, Hfull
 
     # First sampler plucker ray point
     pts, ray_depth_values = compute_query_points_from_rays(rays_o, rays_d, near, far, N_point_ray_enc, False)
+    contract_pts, _ = kwargs['contract'].contract_points_and_distance(rays_o, pts, ray_depth_values)
 
     # Epi sampler
     N_n_sampler = N_n//4
@@ -698,8 +713,12 @@ def render_rays(ray_batch, or_ray_batch, target_pose, ref_poses, ref_rgbs, Hfull
                             (3, 1, 0, 2)).reshape(N_rays, N_point_ray_enc, C_color * N_n_sampler)
 
     if embed_fn: 
-        pts = embed_fn(pts)
+        # pts = embed_fn(pts)
+        contract_pts = embed_fn(contract_pts)
     # m = pts.view(N_rays, -1)
+    
+    # m = torch.cat([pts.view(N_rays, -1), warps_flat.view(N_rays, -1)], dim=-1)
+    
     m = torch.cat([pts.view(N_rays, -1), warps_flat.view(N_rays, -1)], dim=-1)
 
     if train_sampler:
@@ -771,15 +790,17 @@ def render_rays(ray_batch, or_ray_batch, target_pose, ref_poses, ref_rgbs, Hfull
     # This code^ no grad???
 
     epi_pts = rays_o[..., None, :] + rays_d[..., None, :] * depth_values[..., :, None]
+    contract_epi_pts, _ = kwargs['contract'].contract_points_and_distance(rays_o,epi_pts, depth_values)
 
-    # Get plucker ray point
-    # e_rd = rays_d[:, None, :].repeat(1, N_point_ray_enc, 1).view(N_rays * N_point_ray_enc, 3)
-    # m = torch.cross(epi_pts.view(N_rays * N_point_ray_enc, 3), e_rd, dim=1)
-    # m = torch.cat([e_rd, m], dim=-1)
-    # plucker_embed = m.view(N_rays, N_point_ray_enc * 6)
+    # plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:, None, :].repeat(1, N_point_ray_enc, 1)) # nump_pts + origin
+    # # plucker_embed = torch.cat([plucker_embed, contract_epi_pts], dim =-1)
+    # plucker_embed = plucker_embed.view(-1, N_point_ray_enc, 6).view(N_rays, -1)
+
 
     if embed_fn:
-        epi_pts = embed_fn(epi_pts)
+        contract_epi_pts = embed_fn(contract_epi_pts)
+        # epi_pts = embed_fn(epi_pts)
+
     plucker_embed = epi_pts.view(N_rays, -1)
     net_input = torch.cat((plucker_embed.view(N_rays, -1), warps_flat.view(N_rays, -1)), -1)
 
@@ -860,7 +881,10 @@ def render_rays(ray_batch, or_ray_batch, target_pose, ref_poses, ref_rgbs, Hfull
     query_points_nerf = rays_o[..., None, :] + rays_d[..., None, :] * refine_depth_values[..., :, None]
     if train_sampler:
         query_points_nerf = query_points_nerf + (1e-2) * points_offset
-    raw = network_query_fn(query_points_nerf, viewdirs, network_fn)
+
+    contract_query_points_nerf, contract_refine_depth_values = kwargs['contract'].contract_points_and_distance(rays_o,query_points_nerf, refine_depth_values)
+    # raw = network_query_fn(query_points_nerf, viewdirs, network_fn)
+    raw = network_query_fn(contract_query_points_nerf, viewdirs, network_fn)
 
     if train_sampler:
         raw_noise_std = 0
@@ -1105,7 +1129,7 @@ def train():
 
             # Random selection of rays
             all_coords = all_the_coords
-            if i < 500:
+            if i < args.precrop_iters:
                 all_coords = center_coords
             select_inds = random.sample(all_coords, N_rand)
             rays_o = rays_o.view(H*W, 3)[select_inds]  # (N_rand, 3)

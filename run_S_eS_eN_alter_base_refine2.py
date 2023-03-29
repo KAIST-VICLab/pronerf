@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '7'
+gpu_n = '5'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -445,7 +445,7 @@ def create_nerf(args):
 
     model_mmray = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                 input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
-                                6 * args.N_point_ray_enc,
+                                9 * args.N_point_ray_enc,
                                 output_ch=3 * args.N_samples + 3, skips=args.mmnetskips)
     model_mmray.load_state_dict(pretrain_ckpt['mmr_network_fn_state_dict'])
     grad_vars.append({'params': model_mmray.parameters(),
@@ -454,7 +454,7 @@ def create_nerf(args):
     
     model_refine = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                 input_ch=input_ch * args.N_samples if args.mm_emb else
-                                6 * (0+args.N_samples) + 3 * args.num_neighbor * args.N_samples,
+                                9 * (0+args.N_samples) + 3 * args.num_neighbor * args.N_samples,
                                 output_ch=4 * args.N_samples + 3, skips=args.mmnetskips)
     model_refine.load_state_dict(pretrain_ckpt['refine_net_state_dict'])
     grad_vars.append({'params': model_refine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
@@ -644,8 +644,15 @@ def render_rays(ray_batch, or_ray_batch,
             rays_o, rays_d, 0., 1., N_point_ray_enc, randomize=False)  # ! this is ndc space
     
     # 1. mm take point encoding and predict N samples points
-    plucker_pts = kwargs['embed_rays'](pts, rays_d[:,None,:].repeat(1,N_point_ray_enc,1)) # nump_pts + origin
-    plucker_pts = plucker_pts.view(-1, (N_point_ray_enc)*6)
+    # plucker_pts = kwargs['embed_rays'](pts, rays_d[:,None,:].repeat(1,N_point_ray_enc,1)) # nump_pts + origin
+    # plucker_pts = plucker_pts.view(-1, (N_point_ray_enc)*6)
+
+    # plucker_pts = kwargs['embed_rays'](torch.zeros_like(rays_o[:, None, :].repeat(1, N_point_ray_enc, 1)), pts)
+    # plucker_pts = plucker_pts.view(-1, (N_point_ray_enc) * 6)
+
+    plucker_pts = kwargs['embed_rays'](pts, rays_d[:, None, :].repeat(1, N_point_ray_enc, 1))  # nump_pts + origin
+    plucker_pts = torch.cat([pts, plucker_pts], dim =-1)
+    plucker_pts = plucker_pts.view(-1, (N_point_ray_enc) * 9)
 
     # pts = pts.view(-1, N_point_ray_enc * 3)
     min_max_rays = min_max_ray_net(plucker_pts)
@@ -721,8 +728,11 @@ def render_rays(ray_batch, or_ray_batch,
 
     epi_pts = rays_o[..., None, :] + rays_d[..., None, :] * depth_values[..., :, None]
 
+    # plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:, None, :].repeat(1, num_pts, 1)) # nump_pts + origin
+    # plucker_embed = plucker_embed.view(-1, num_pts, 6).view(N_rays, -1)
     plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:, None, :].repeat(1, num_pts, 1)) # nump_pts + origin
-    plucker_embed = plucker_embed.view(-1, num_pts, 6).view(N_rays, -1)
+    plucker_embed = torch.cat([plucker_embed, epi_pts], dim =-1)
+    plucker_embed = plucker_embed.view(-1, num_pts, 6 + 3).view(N_rays, -1)
 
     refine_input = torch.cat([plucker_embed, epi_features], dim =1)
     refine_output = refine_net(refine_input)

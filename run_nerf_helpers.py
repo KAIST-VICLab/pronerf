@@ -134,6 +134,30 @@ def compute_angle(xyz, query_camera, train_cameras):
     ray_diff = torch.cat([ray_diff_direction, ray_diff_dot], dim=-1) # nrays, nsamples, nviews, 4
     return ray_diff
 
+def intersect_sphere(rays_o, rays_d, origin = None, radius = 2.5):
+    if origin is None:
+        origin = torch.zeros_like(rays_o)
+    rays_o = rays_o-origin
+    o = rays_o
+    d = rays_d
+
+    dot_o_o = torch.bmm(o[:,None],o[:,:,None]).squeeze(-1)
+    dot_d_d = torch.bmm(d[:,None],d[:,:,None]).squeeze(-1)
+    dot_o_d = torch.bmm(o[:,None],d[:,:,None]).squeeze(-1)
+
+    a = dot_d_d
+    b = 2 * dot_o_d
+    c = dot_o_o - radius * radius
+    disc = b * b - 4 * a * c
+    t1 = (-b + torch.sqrt(disc + 1e-8)) / (2 * a)
+    t2 = (-b - torch.sqrt(disc + 1e-8)) / (2 * a)
+
+    t, _ = torch.sort(torch.cat([t1,t2], dim =-1), dim =-1)
+
+    # sort t1 and t2 in order
+    return t[...,0][...,None], t[...,1][...,None]
+
+
 class BaseContract(nn.Module):
     def __init__(
         self,
@@ -165,19 +189,19 @@ class BaseContract(nn.Module):
         distance = torch.norm(points - rays_o[..., None, :], dim=-1, keepdim=True)
 
         # Return
-        return points, distance 
+        return points, distance.squeeze(-1)
        
 class MIPNeRFContract(BaseContract):
     def __init__(
-        self,
-        contract_end_radius,
+        self,contract_start_radius = 2.0,
+        contract_end_radius = None,
         **kwargs
     ):
         super().__init__()
 
 
-        self.contract_start_radius = 2.0
-        self.contract_end_radius = contract_end_radius
+        self.contract_start_radius = contract_start_radius
+        self.contract_end_radius = contract_end_radius if contract_end_radius is not None else float("inf")
 
 
         self.contract_start_distance = self.contract_start_radius
@@ -237,6 +261,7 @@ class MIPNeRFContract(BaseContract):
 class Pluecker(nn.Module):
     def __init__(
         self,
+        origin = None
     ):
 
         super().__init__()
@@ -247,7 +272,7 @@ class Pluecker(nn.Module):
         self.direction_multiplier = 1.0
         self.moment_multiplier =  1.0
 
-        self.origin = torch.tensor([0.0, 0.0, 0.0], device='cuda')
+        self.origin = origin
 
     def forward(self, rays_o, rays_d):       
         rays_d = torch.nn.functional.normalize(rays_d, p=2.0, dim=-1)
