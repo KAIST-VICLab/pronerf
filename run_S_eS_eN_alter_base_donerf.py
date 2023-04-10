@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '0'
+gpu_n = '5'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -131,6 +131,8 @@ def config_parser():
                         help='render the test set instead of render_poses path')
     parser.add_argument("--render_factor", type=int, default=0,
                         help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
+    parser.add_argument("--scene_origin", type=float, default=[0,0,0], nargs='*',
+                        help='scene_origin')
 
     # training options
     parser.add_argument("--precrop_iters", type=int, default=0,
@@ -892,6 +894,12 @@ def train():
 
     elif args.dataset_type == 'donerf':
         images, poses, near, far, hwf, render_poses, i_train, i_test = load_donerf_data(args.datadir, args.no_ndc)
+
+        # # shift cam origin
+        # scene_origin = np.array(args.scene_origin)
+        # poses[:,:,-1] -= scene_origin
+        # render_poses[:,:,-1] -= scene_origin
+
         print('Loaded donerf', images.shape, render_poses.shape, hwf, args.datadir)
         i_val = i_test[:8] # only val 8 images
         print('DEFINING BOUNDS')

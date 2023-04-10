@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '6'
+gpu_n = '5'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -449,7 +449,7 @@ def create_nerf(args):
                                 output_ch=3 * args.N_samples + 3, skips=args.mmnetskips)
     model_mmray.load_state_dict(pretrain_ckpt['mmr_network_fn_state_dict'])
     grad_vars.append({'params': model_mmray.parameters(),
-                     'weight_decay': args.weight_decay, 'lr': args.lrate})
+                     'weight_decay': args.weight_decay, 'lr':args.lrate})
     
     
     model_refine = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,

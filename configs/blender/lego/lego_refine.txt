@@ -1,12 +1,12 @@
-expname = lego_refine_Ns12_Nn8_Nrp48_4096_noautosort_nodonerf_2epi_raynear
+expname = lego_refine_32samples_4nn_spherical_raypoint
 datadir = ./data/nerf_synthetic/lego
-pretrain_path = logs_epi_blender/lego_sampler_12samples_12nn_2episampler_raynear/500000.tar
+pretrain_path = logs_epi_blender/lego_sampler_32samples_4nn_spherical_raypoint/490000.tar
 dataset_type = blender
 
-N_samples = 12
+N_samples = 32
 N_importance = 0
 N_rand = 8192
-N_n = 12
+N_n = 4
 
 mm_emb = False
 weight_decay = 0e-8

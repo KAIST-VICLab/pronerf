@@ -1,6 +1,6 @@
 import os, sys
 
-gpu_n = '3'
+gpu_n = '5'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 
@@ -669,6 +669,7 @@ def render_rays(ray_batch, or_ray_batch, target_pose, ref_poses, ref_rgbs, Hfull
     far = spherical_far
 
     pts, _ = compute_query_points_from_rays(rays_o, rays_d, near, far, N_point_ray_enc, False)
+
 
     # First sampler only plucker
     # plucker_pts = kwargs['embed_rays'](rays_o, rays_d)
