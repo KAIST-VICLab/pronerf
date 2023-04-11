@@ -1,15 +1,58 @@
 import numpy as np
 import os, imageio
-import cv2
+from imageio.v2 import imread
+from PIL import Image
 
 
 ########## Slightly modified version of LLFF data loading code 
 ##########  see https://github.com/Fyusion/LLFF for original
 
-def _minify(basedir, factors=[], resolutions=[]):
+def _minify_undist(basedir, factors=[], resolutions=[]):
     needtoload = False
     for r in factors:
         imgdir = os.path.join(basedir, 'images_{}'.format(r))
+        print((imgdir))
+        if not os.path.exists(imgdir):
+            needtoload = True
+    for r in resolutions:
+        imgdir = os.path.join(basedir, 'images_{}x{}'.format(r[1], r[0]))
+        if not os.path.exists(imgdir):
+            needtoload = True
+    if not needtoload:
+        return
+
+    imgdir = os.path.join(basedir, 'images')
+    imgs = [[imread(os.path.join(imgdir, f)), os.path.basename(f)] for f in sorted(os.listdir(imgdir))]
+    imgs = [f for f in imgs if any([f[1].endswith(ex) for ex in ['JPG', 'jpg', 'png', 'jpeg', 'PNG']])]
+
+    for r in factors + resolutions:
+        if isinstance(r, int):
+            name = 'images_{}'.format(r)
+        else:
+            name = 'images_{}x{}'.format(r[1], r[0])
+        imgdir = os.path.join(basedir, name)
+        if os.path.exists(imgdir):
+            continue
+
+        os.makedirs(imgdir)
+        print('Minifying', r, basedir)
+
+        for img in imgs:
+            if isinstance(r, int):
+                H, W, X = img[0].shape
+                rImg = Image.fromarray(img[0]).resize((int(W / r), int(H / r)), resample=Image.BICUBIC)
+                rImg.save(os.path.join(imgdir, img[1][:-4] + ".png"))
+            else:
+                rImg = Image.fromarray(img[0]).resize((r[1], r[0]), resample=Image.BICUBIC)
+                rImg.save(os.path.join(imgdir, img[1][:-4] + ".png"))
+        print('Done')
+
+
+def _minify_nerf(basedir, factors=[], resolutions=[]):
+    needtoload = False
+    for r in factors:
+        imgdir = os.path.join(basedir, 'images_{}'.format(r))
+        print((imgdir))
         if not os.path.exists(imgdir):
             needtoload = True
     for r in resolutions:
@@ -43,7 +86,7 @@ def _minify(basedir, factors=[], resolutions=[]):
         print('Minifying', r, basedir)
         
         os.makedirs(imgdir)
-        check_output('cp {}/* {}'.format(imgdir_orig, imgdir), shell=True)
+        check_output('copy {}/* {}'.format(imgdir_orig, imgdir), shell=True)
         
         ext = imgs[0].split('.')[-1]
         args = ' '.join(['mogrify', '-resize', resizearg, '-format', 'png', '*.{}'.format(ext)])
@@ -53,25 +96,42 @@ def _minify(basedir, factors=[], resolutions=[]):
         os.chdir(wd)
         
         if ext != 'png':
-            check_output('rm {}/*.{}'.format(imgdir, ext), shell=True)
+            # check_output('rm {}/*.{}'.format(imgdir, ext), shell=True)
             print('Removed duplicates')
         print('Done')
-            
-        
-        
+
         
 def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
-    
+    print(basedir)
     poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
-    poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0])
+
+    if os.path.isfile(os.path.join(basedir, 'hwf_cxcy.npy')):
+        #h, w, fx, fy, cx, cy
+        intrinsic_arr = np.load(os.path.join(basedir, 'hwf_cxcy.npy'))
+        # print(intrinsic_arr)
+        poses = poses_arr[:, :-2].reshape([-1, 3, 4]).transpose([1,2,0])
+        hwf = np.ones((3, 1, poses.shape[2]))
+        hwf[0, 0, :] = intrinsic_arr[0]
+        hwf[1, 0, :] = intrinsic_arr[1]
+        hwf[2, 0, :] = intrinsic_arr[2]
+        print(poses.shape)
+        poses = np.concatenate([poses, hwf], axis=1)
+    else:
+        poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0])
     bds = poses_arr[:, -2:].transpose([1,0])
     
     img0 = [os.path.join(basedir, 'images', f) for f in sorted(os.listdir(os.path.join(basedir, 'images'))) \
             if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
-    sh = imageio.imread(img0).shape
+    sh = imageio.v2.imread(img0).shape
     
     sfx = ''
-    
+
+    if 'undist' in basedir:
+        print('_minify_undist')
+        _minify = _minify_undist
+    else:
+        _minify = _minify_nerf
+
     if factor is not None:
         sfx = '_{}'.format(factor)
         _minify(basedir, factors=[factor])
@@ -90,18 +150,17 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
         factor = 1
     
     imgdir = os.path.join(basedir, 'images' + sfx)
-    imgdir = 'data/nerf_llff_data_undist/fern_undistort/images_distort'
     if not os.path.exists(imgdir):
         print( imgdir, 'does not exist, returning' )
         return
     
-    imgfiles = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir)) if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
+    imgfiles = [os.path.join(imgdir, f) for f in
+                sorted(os.listdir(imgdir)) if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
     if poses.shape[-1] != len(imgfiles):
         print( 'Mismatch between imgs {} and poses {} !!!!'.format(len(imgfiles), poses.shape[-1]) )
-        return
+        # return
     
-    sh = imageio.imread(imgfiles[0]).shape
-    sh = (756,1008,3)
+    sh = imageio.v2.imread(imgfiles[0]).shape
     poses[:2, 4, :] = np.array(sh[:2]).reshape([2, 1])
     poses[2, 4, :] = poses[2, 4, :] * 1./factor
 
@@ -114,9 +173,9 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
         else:
             return imageio.imread(f)
         
-    imgs = [cv2.resize(imread(f), (1008, 756),interpolation=cv2.INTER_AREA) for f in imgfiles]
-    imgs = [img[...,:3]/255. for img in imgs]
-    imgs = np.stack(imgs, -1)  
+    imgs = [imread(f)[...,:3]/255. for f in imgfiles]
+    imgs = np.stack(imgs, -1)
+    print(poses.shape)
     
     print('Loaded image data', imgs.shape, poses[:,-1,0])
     return poses, bds, imgs
@@ -245,7 +304,8 @@ def spherify_poses(poses, bds):
     
 
 def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
-    
+    print(basedir)
+    print(factor)
 
     poses, bds, imgs = _load_data(basedir, factor=factor) # factor=8 downsamples original imgs by 8x
     print('Loaded', basedir, bds.min(), bds.max())
@@ -318,6 +378,3 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=Fal
     poses = poses.astype(np.float32)
 
     return images, poses, bds, render_poses, i_test
-
-
-

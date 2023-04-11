@@ -1,7 +1,7 @@
-expname = fern_sampler_e2e_donerf_12samples_undist
-datadir = data/nerf_llff_data_undist/fern_undistort
-pretrain_depth_path = pretrained_depths/pretrained_depth_fern.npy 
-pretrain_path = logs/fern_reproduce/200000.tar
+expname = leaves_sampler_e2e_donerf_12samples_undist
+datadir = data/nerf_llff_data_undist/leaves_undistort
+pretrain_depth_path = pretrained_depths/pretrained_depth_leaves.npy 
+pretrain_path = logs/leaves_reproduce/200000.tar
 dataset_type = llff
 
 factor = 4
