@@ -1,4 +1,4 @@
-expname = trex_sampler_e2e_donerf_12samples_newplucker
+expname = trex_sampler_e2e_nerf_12samples
 datadir = ./data/nerf_llff_data/trex
 pretrain_depth_path = pretrained_depths/pretrained_depth_trex.npy 
 pretrain_path = logs/trex_reproduce/300000.tar

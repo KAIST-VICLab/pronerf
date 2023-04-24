@@ -1,4 +1,4 @@
-expname = flower_sampler_e2e_donerf_12samples_newplucker
+expname = flower_sampler_e2e_nerf_12samples
 datadir = ./data/nerf_llff_data/flower
 pretrain_depth_path = pretrained_depths/pretrained_depth_flower.npy 
 pretrain_path = logs/flower_reproduce/200000.tar

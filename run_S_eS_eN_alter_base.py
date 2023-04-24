@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '6'
+gpu_n = '7'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -452,11 +452,11 @@ def create_nerf(args):
                           input_ch_epi=3*args.num_neighbor, output_ch=output_ch,
                           skips=skips, input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
     else:
-        # model = NeRF(D=args.netdepth, W=args.netwidth,
-        #              input_ch=input_ch, output_ch=output_ch, skips=skips,
-        #              input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
-        model = DoNeRF(D=args.netdepth, W=args.netwidth,
-                     n_in=input_ch + input_ch_views, n_out=output_ch, skip='auto')
+        model = NeRF(D=args.netdepth, W=args.netwidth,
+                     input_ch=input_ch, output_ch=output_ch, skips=skips,
+                     input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
+        # model = DoNeRF(D=args.netdepth, W=args.netwidth,
+        #              n_in=input_ch + input_ch_views, n_out=output_ch, skip='auto')
     model.to(device)
     # model.load_state_dict(pretrain_ckpt['network_fn_state_dict'])
     grad_vars.append({'params': model.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
@@ -473,13 +473,13 @@ def create_nerf(args):
 
     model_mmray = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                 input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
-                                9 * args.N_point_ray_enc,
+                                6 * args.N_point_ray_enc,
                                 output_ch=3 * args.N_samples + 3, skips=args.mmnetskips)
     s_grad_vars.append({'params': model_mmray.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     model_refine = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                 input_ch=input_ch * args.N_samples if args.mm_emb else
-                                9 * (0+args.N_samples) + 3 * args.num_neighbor * args.N_samples,
+                                6 * (0+args.N_samples) + 3 * args.num_neighbor * args.N_samples,
                                 output_ch=4 * args.N_samples + 3, skips=args.mmnetskips)
     s_grad_vars.append({'params': model_refine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
@@ -670,15 +670,15 @@ def render_rays(ray_batch, or_ray_batch,
             rays_o, rays_d, 0., 1., N_point_ray_enc, randomize=False)  # ! this is ndc space
 
     # 1. mm take point encoding and predict N samples points
-    # plucker_pts = kwargs['embed_rays'](pts, rays_d[:, None, :].repeat(1, N_point_ray_enc, 1))  # nump_pts + origin
-    # plucker_pts = plucker_pts.view(-1, (N_point_ray_enc) * 6)
+    plucker_pts = kwargs['embed_rays'](pts, rays_d[:, None, :].repeat(1, N_point_ray_enc, 1))  # nump_pts + origin
+    plucker_pts = plucker_pts.view(-1, (N_point_ray_enc) * 6)
 
     # plucker_pts = kwargs['embed_rays'](torch.zeros_like(rays_o[:, None, :].repeat(1, N_point_ray_enc, 1)), pts)
     # plucker_pts = plucker_pts.view(-1, (N_point_ray_enc) * 6)
 
-    plucker_pts = kwargs['embed_rays'](pts, rays_d[:, None, :].repeat(1, N_point_ray_enc, 1))  # nump_pts + origin
-    plucker_pts = torch.cat([pts, plucker_pts], dim =-1)
-    plucker_pts = plucker_pts.view(-1, (N_point_ray_enc) * 9)
+    # plucker_pts = kwargs['embed_rays'](pts, rays_d[:, None, :].repeat(1, N_point_ray_enc, 1))  # nump_pts + origin
+    # plucker_pts = torch.cat([pts, plucker_pts], dim =-1)
+    # plucker_pts = plucker_pts.view(-1, (N_point_ray_enc) * 9)
 
 
     if train_sampler:
@@ -759,15 +759,15 @@ def render_rays(ray_batch, or_ray_batch,
 
     epi_pts = rays_o[..., None, :] + rays_d[..., None, :] * depth_values[..., :, None]
 
-    # plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:, None, :].repeat(1, num_pts, 1)) # nump_pts + origin
-    # plucker_embed = plucker_embed.view(-1, num_pts, 6)
+    plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:, None, :].repeat(1, num_pts, 1)) # nump_pts + origin
+    plucker_embed = plucker_embed.view(-1, num_pts, 6)
 
     # plucker_embed = kwargs['embed_rays'](torch.zeros_like(rays_o[:, None, :].repeat(1, num_pts, 1)), epi_pts)
     # plucker_embed = plucker_embed.view(-1, num_pts, 6)
 
-    plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:, None, :].repeat(1, num_pts, 1)) # nump_pts + origin
-    plucker_embed = torch.cat([plucker_embed, epi_pts], dim =-1)
-    plucker_embed = plucker_embed.view(-1, num_pts, 6 + 3)
+    # plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:, None, :].repeat(1, num_pts, 1)) # nump_pts + origin
+    # plucker_embed = torch.cat([plucker_embed, epi_pts], dim =-1)
+    # plucker_embed = plucker_embed.view(-1, num_pts, 6 + 3)
     
     # plucker_embed = torch.cat((rays_o[:,None], rays_d[:,None], epi_pts), 1).view(-1, 6 + num_pts * 3)
     net_input = torch.cat((plucker_embed.view(N_rays, -1), epi_features.view(N_rays, -1)), -1)

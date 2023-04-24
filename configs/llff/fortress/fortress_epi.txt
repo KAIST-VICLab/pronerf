@@ -1,4 +1,4 @@
-expname = fortress_sampler_e2e_donerf_12samples_newplucker
+expname = fortress_sampler_e2e_nerf_12samples
 datadir = ./data/nerf_llff_data/fortress
 pretrain_depth_path = pretrained_depths/pretrained_depth_fortress.npy 
 pretrain_path = logs/fortress_reproduce/200000.tar

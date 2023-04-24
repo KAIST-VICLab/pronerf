@@ -1,4 +1,4 @@
-expname = orchids_sampler_e2e_donerf_12samples_newplucker
+expname = orchids_sampler_e2e_nerf_12samples
 datadir = ./data/nerf_llff_data/orchids
 pretrain_depth_path = pretrained_depths/pretrained_depth_orchids.npy 
 pretrain_path = logs/orchids_reproduce/200000.tar

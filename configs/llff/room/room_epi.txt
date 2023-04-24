@@ -1,4 +1,4 @@
-expname = room_sampler_e2e_donerf_12samples_newplucker
+expname = room_sampler_e2e_nerf_12samples
 datadir = ./data/nerf_llff_data/room
 pretrain_depth_path = pretrained_depths/pretrained_depth_room.npy 
 pretrain_path = logs/room_reproduce/400000.tar

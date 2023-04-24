@@ -2,7 +2,7 @@ from __future__ import division
 import torch
 from torch.autograd import Variable
 import torch.nn.functional as F
-from opt_einsum import contract
+# from opt_einsum import contract
 torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
 pixel_coords = None
