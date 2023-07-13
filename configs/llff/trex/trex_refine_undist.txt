@@ -1,4 +1,4 @@
-expname = trex_refine_12samples_undist
+expname = trex_refine_12samples_undist_reg5e8
 pretrain_path = logs_epi_RR/trex_sampler_e2e_donerf_12samples_undist/500000.tar
 datadir = data/nerf_llff_data_undist/trex_undistort
 dataset_type = llff

@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '4'
+gpu_n = '5'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -576,10 +576,9 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
             noise = torch.Tensor(noise)
 
     if mm_density_add is not None:
-        alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
-        if True:
+        alpha = raw2alpha(raw[...,3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
+        if False:
             alpha = alpha*torch.relu(mm_density_mul)
-            # alpha = alpha*torch.sigmoid(mm_density_mul)
     else:
         alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
 
@@ -1052,33 +1051,33 @@ def train():
                 }, path)
                 print('Saved checkpoints at', path)
 
-        # if (i % args.i_video == 0 and i > 0) or (args.render_only):
-        #     # Turn on testing mode
-        #     with torch.no_grad():
-        #         r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
-        #         rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
-        #     print('Done, saving', rgbs0.shape)
-        #     if args.render_only:
-        #         testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
-        #             'test' if args.render_test else 'path', start))
-        #         os.makedirs(testsavedir, exist_ok=True)
-        #         moviebase = os.path.join(
-        #             testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
-        #     else:
-        #         moviebase = os.path.join(
-        #             basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-        #     imageio.mimwrite(moviebase + 'rgb0.mp4',
-        #                      to8b(rgbs0), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'rgb1.mp4',
-        #                      to8b(rgbs1), fps=30, quality=8)
-        #     # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
-        #                      np.percentile(depths, 99)), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
-        #                      np.percentile(depths0, 99)), fps=30, quality=8)
-        #     # print(f'Mean depth {np.mean(depths)}')
-        #     if args.render_only:
-        #         return
+        if (i % args.i_video == 0 and i > 0) or (args.render_only):
+            # Turn on testing mode
+            with torch.no_grad():
+                r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
+                rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
+            print('Done, saving', rgbs0.shape)
+            if args.render_only:
+                testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
+                    'test' if args.render_test else 'path', start))
+                os.makedirs(testsavedir, exist_ok=True)
+                moviebase = os.path.join(
+                    testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
+            else:
+                moviebase = os.path.join(
+                    basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+            imageio.mimwrite(moviebase + 'rgb0.mp4',
+                             to8b(rgbs0), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'rgb1.mp4',
+                             to8b(rgbs1), fps=30, quality=8)
+            # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
+                             np.percentile(depths, 99)), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
+                             np.percentile(depths0, 99)), fps=30, quality=8)
+            # print(f'Mean depth {np.mean(depths)}')
+            if args.render_only:
+                return
 
         if (i % args.i_testset == 0 and i > 0) or (args.render_test):
             if args.render_test:

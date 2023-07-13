@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '7'
+gpu_n = '5'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -698,6 +698,7 @@ def render_rays(ray_batch, or_ray_batch,
     or_rays_o, or_rays_d = or_ray_batch[:, 0:3], or_ray_batch[:, 3:6]  # [N_rays, 3] each
     or_bounds = torch.reshape(or_ray_batch[..., 6:8], [-1, 1, 2])
     or_near, or_far = or_bounds[0, 0, 0], or_bounds[0, 0, 1]  # [-1,1]
+
     with torch.no_grad():
         num_pts = N_samples
         num_neighbor = kwargs['num_neighbor']
@@ -742,17 +743,17 @@ def render_rays(ray_batch, or_ray_batch,
         depths = depth_values_3d[None, None, :, :].repeat(k_ref, 1, 1, 1)  # k_ref, H, W, N_point_ray_enc
         depths = (depths.permute(0, 3, 1, 2)).reshape(-1, warp_H, warp_W)  # k_ref * N_point_ray_enc, H, W
         warps, _ = inverse_warp.inverse_warp_rod1_rt2_coords(ref_rgb, depths, ro1, rd1, ref_pose, ref_K, inv_K,
-                                                             padding_mode='zeros')
+                                                                padding_mode='zeros')
         warps_flat = warps.clone().view(1, k_ref, num_pts, 3, warp_H, warp_W)
         rays_valid_id = ref_nos.transpose(0, 1)[None, :, None, None, None].repeat(1, 1, num_pts, 3, 1, 1)
         warps_flat = torch.gather(warps_flat, dim=1, index=rays_valid_id.long())  # 1, validid, N samples, 3, 1, N rays
 
-        valid_warp = (torch.sum(warps_flat.detach(), 3, True) > 0).type_as(warps).repeat(1, 1, 1, 3, 1, 1)
-        mean_sample_warp = torch.sum(valid_warp * warps_flat.detach(), 1, True) / (torch.sum(valid_warp, 1, True) + 1e-6)
-        warps_flat = warps_flat * valid_warp + mean_sample_warp * (1 - valid_warp)  # [1, 4, 12, 3, 1, 4096]
+        # valid_warp = (torch.sum(warps_flat.detach(), 3, True) > 0).type_as(warps).repeat(1, 1, 1, 3, 1, 1)
+        # mean_sample_warp = torch.sum(valid_warp * warps_flat.detach(), 1, True) / (torch.sum(valid_warp, 1, True) + 1e-6)
+        # warps_flat = warps_flat * valid_warp + mean_sample_warp * (1 - valid_warp)  # [1, 4, 12, 3, 1, 4096]
 
-        epi_features = (warps_flat.view(num_neighbor, num_pts, 3, warp_H * warp_W).permute(3, 1, 0, 2)). \
-            reshape(-1, num_pts, num_neighbor * 3)  # N rays, num_pts, num_neighbor*3
+    epi_features = (warps_flat.view(num_neighbor, num_pts, 3, warp_H * warp_W).permute(3, 1, 0, 2)). \
+        reshape(-1, num_pts, num_neighbor * 3)  # N rays, num_pts, num_neighbor*3
 
     epi_pts = rays_o[..., None, :] + rays_d[..., None, :] * depth_values[..., :, None]
 
@@ -1146,33 +1147,33 @@ def train():
             }, path)
             print('Saved checkpoints at', path)
 
-        # if (i % args.i_video == 0 and i > 0) or (args.render_only):
-        #     # Turn on testing mode
-        #     with torch.no_grad():
-        #         r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
-        #         rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
-        #     print('Done, saving', rgbs0.shape)
-        #     if args.render_only:
-        #         testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
-        #             'test' if args.render_test else 'path', start))
-        #         os.makedirs(testsavedir, exist_ok=True)
-        #         moviebase = os.path.join(
-        #             testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
-        #     else:
-        #         moviebase = os.path.join(
-        #             basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-        #     imageio.mimwrite(moviebase + 'rgb0.mp4',
-        #                      to8b(rgbs0), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'rgb1.mp4',
-        #                      to8b(rgbs1), fps=30, quality=8)
-        #     # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
-        #                      np.percentile(depths, 99)), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
-        #                      np.percentile(depths0, 99)), fps=30, quality=8)
-        #     # print(f'Mean depth {np.mean(depths)}')
-        #     if args.render_only:
-        #         return
+        if (i % args.i_video == 0 and i > 0) or (args.render_only):
+            # Turn on testing mode
+            with torch.no_grad():
+                r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
+                rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
+            print('Done, saving', rgbs0.shape)
+            if args.render_only:
+                testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
+                    'test' if args.render_test else 'path', start))
+                os.makedirs(testsavedir, exist_ok=True)
+                moviebase = os.path.join(
+                    testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
+            else:
+                moviebase = os.path.join(
+                    basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+            imageio.mimwrite(moviebase + 'rgb0.mp4',
+                             to8b(rgbs0), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'rgb1.mp4',
+                             to8b(rgbs1), fps=30, quality=8)
+            # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
+                             np.percentile(depths, 99)), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
+                             np.percentile(depths0, 99)), fps=30, quality=8)
+            # print(f'Mean depth {np.mean(depths)}')
+            if args.render_only:
+                return
 
         if (i % args.i_testset == 0 and i > 0) or (args.render_test):
             if args.render_test:

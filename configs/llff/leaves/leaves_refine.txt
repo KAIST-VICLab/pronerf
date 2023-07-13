@@ -1,5 +1,6 @@
-expname = leaves_refine_12samples_v2_newplucker
-pretrain_path = logs_epi_RR/leaves_sampler_e2e_donerf_12samples_newplucker/500000.tar
+expname = leaves_refine_e2e_nerf_12samples
+ft_path = logs_epi_RR/leaves_refine_e2e_nerf_12samples/430000.tar
+pretrain_path = logs_epi_RR/leaves_sampler_e2e_nerf_12samples/500000.tar
 datadir = ./data/nerf_llff_data/leaves
 dataset_type = llff
 

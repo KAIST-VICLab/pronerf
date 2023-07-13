@@ -365,28 +365,28 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
-            rgb8 = to8b(gt_imgs[i].cpu().numpy())
-            filename = os.path.join(savedir, 'gt_{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
+            # rgb8 = to8b(gt_imgs[i].cpu().numpy())
+            # filename = os.path.join(savedir, 'gt_{:03d}.png'.format(i))
+            # imageio.imwrite(filename, rgb8)
 
-            filename = os.path.join(savedir, 'err{:03d}.png'.format(i))
-            imageio.imwrite(filename, error)
+            # filename = os.path.join(savedir, 'err{:03d}.png'.format(i))
+            # imageio.imwrite(filename, error)
 
-            rgb8 = to8b(depths[-1]/np.max(depths[-1]))
-            filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
+            # rgb8 = to8b(depths[-1]/np.max(depths[-1]))
+            # filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
+            # imageio.imwrite(filename, rgb8)
 
-            rgb8 = to8b(depths0[-1]/np.max(depths0[-1]))
-            filename = os.path.join(savedir, 'depth0_{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
+            # rgb8 = to8b(depths0[-1]/np.max(depths0[-1]))
+            # filename = os.path.join(savedir, 'depth0_{:03d}.png'.format(i))
+            # imageio.imwrite(filename, rgb8)
 
-            rgb8 = to8b(depths00[-1]/np.max(depths00[-1]))
-            filename = os.path.join(savedir, 'depth00_{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
+            # rgb8 = to8b(depths00[-1]/np.max(depths00[-1]))
+            # filename = os.path.join(savedir, 'depth00_{:03d}.png'.format(i))
+            # imageio.imwrite(filename, rgb8)
 
-            rgb8 = cv2.applyColorMap(((depth_diffs[-1] - np.min(depth_diffs[-1]))/(np.max(depth_diffs[-1]) - np.min(depth_diffs[-1])) * 255).astype(np.uint8), cv2.COLORMAP_JET)
-            filename = os.path.join(savedir, 'depthdiff_{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
+            # rgb8 = cv2.applyColorMap(((depth_diffs[-1] - np.min(depth_diffs[-1]))/(np.max(depth_diffs[-1]) - np.min(depth_diffs[-1])) * 255).astype(np.uint8), cv2.COLORMAP_JET)
+            # filename = os.path.join(savedir, 'depthdiff_{:03d}.png'.format(i))
+            # imageio.imwrite(filename, rgb8)
 
     rgbs0 = np.stack(rgbs0, 0)
     rgbs1 = np.stack(rgbs1, 0)
@@ -1126,33 +1126,33 @@ def train():
                 }, path)
                 print('Saved checkpoints at', path)
 
-        # if (i % args.i_video == 0 and i > 0) or (args.render_only):
-        #     # Turn on testing mode
-        #     with torch.no_grad():
-        #         r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
-        #         rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
-        #     print('Done, saving', rgbs0.shape)
-        #     if args.render_only:
-        #         testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
-        #             'test' if args.render_test else 'path', start))
-        #         os.makedirs(testsavedir, exist_ok=True)
-        #         moviebase = os.path.join(
-        #             testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
-        #     else:
-        #         moviebase = os.path.join(
-        #             basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-        #     imageio.mimwrite(moviebase + 'rgb0.mp4',
-        #                      to8b(rgbs0), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'rgb1.mp4',
-        #                      to8b(rgbs1), fps=30, quality=8)
-        #     # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
-        #                      np.percentile(depths, 99)), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
-        #                      np.percentile(depths0, 99)), fps=30, quality=8)
-        #     # print(f'Mean depth {np.mean(depths)}')
-        #     if args.render_only:
-        #         return
+        if (i % args.i_video == 0 and i > 0) or (args.render_only):
+            # Turn on testing mode
+            if args.render_only:
+                testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
+                    'test' if args.render_test else 'path', start))
+                os.makedirs(testsavedir, exist_ok=True)
+                moviebase = os.path.join(
+                    testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
+            else:
+                moviebase = os.path.join(
+                    basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+            with torch.no_grad():
+                r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=None,savedir=testsavedir)
+                rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
+            print('Done, saving', rgbs0.shape)
+            imageio.mimwrite(moviebase + 'rgb0.mp4',
+                             to8b(rgbs0), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'rgb1.mp4',
+                             to8b(rgbs1), fps=30, quality=8)
+            # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
+                             np.percentile(depths, 99)), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
+                             np.percentile(depths0, 99)), fps=30, quality=8)
+            # print(f'Mean depth {np.mean(depths)}')
+            if args.render_only:
+                return
 
         if (i % args.i_testset == 0 and i > 0) or (args.render_test):
             if args.render_test:

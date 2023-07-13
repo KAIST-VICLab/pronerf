@@ -1,4 +1,4 @@
-expname = fern_refine_12samples_v2
+expname = fern_refine_e2e_nerf_12samples
 pretrain_path = logs_epi_RR/fern_sampler_e2e_donerf_12samples/500000.tar
 datadir = data/nerf_llff_data/fern
 dataset_type = llff

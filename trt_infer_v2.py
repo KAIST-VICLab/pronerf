@@ -15,7 +15,7 @@ from run_nerf_helpers import get_embedder
 # gpu_n = '6'
 # os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 
-N_SAMPLES = 12
+N_SAMPLES = 8
 N_POINT_RAY_ENC = 48
 NUM_NEIGHBOR = 4
 

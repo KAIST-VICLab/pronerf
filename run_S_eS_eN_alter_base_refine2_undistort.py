@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '6'
+gpu_n = '7'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -17,6 +17,8 @@ import torch.nn.functional as F
 from tqdm import tqdm, trange
 import inverse_warp
 import lpips
+from skimage.metrics import structural_similarity
+from ssim_torch import ssim as r2l_ssim_func
 
 import matplotlib.pyplot as plt
 
@@ -313,9 +315,10 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     depth_diffs = []
     psnrs = []
     ssims = []
+    nex_ssims = []
+    r2l_ssims = []
     lpips_res = []
-    # lpips_vgg = lpips.LPIPS(net="vgg").cuda()
-    # lpips_vgg = lpips_vgg.eval()
+    lpips_res_alex = []
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
@@ -349,16 +352,22 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
             # ssims
             ssim = img2ssim(rgb1.cpu(), (gt_imgs[i]).cpu())
+            r2l_ssim = r2l_ssim_func(
+                rgb1.cpu()[None].permute(0, 3, 1, 2), (gt_imgs[i]).cpu()[None].permute(0, 3, 1, 2))
+            nex_ssim = structural_similarity(rgb1.cpu().numpy(), (gt_imgs[i]).cpu(
+            ).numpy(), win_size=11, multichannel=True, gaussian_weights=True)
             ssims.append(ssim)
+            nex_ssims.append(nex_ssim)
+            r2l_ssims.append(r2l_ssim)
 
             # lpips
-            lpips_val = rgb_lpips((gt_imgs[i]).cpu().numpy(), rgb1.cpu().numpy(), 'vgg', device)
+            lpips_val = rgb_lpips(
+                (gt_imgs[i]).cpu().numpy(), rgb1.cpu().numpy(), 'vgg', device)
             lpips_res.append(lpips_val)
 
-            # scaled_gt = (gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
-            # scaled_pred = rgb1.permute(2, 0, 1)[None] * 2.0 - 1.0
-            # lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
-            # lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
+            lpips_val = rgb_lpips(
+                (gt_imgs[i]).cpu().numpy(), rgb1.cpu().numpy(), 'alex', device)
+            lpips_res_alex.append(lpips_val)
 
         if savedir is not None:
             rgb8 = to8b(rgbs1[-1])
@@ -397,11 +406,11 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             mean_psnr = mean_psnr + this_psnr / len(psnrs)
         print(psnrs)
         print(f'Mean Test PSNR {mean_psnr.detach().item()}')
-    # if len(psnrs) > 0:
-    #     psnrs = np.array(psnrs)
-    #     print(f'Mean Test PSNR {psnrs.mean()}')
-    print('LPIPS', np.array(lpips_res).mean())
+    print('LPIPS vgg', np.array(lpips_res).mean())
+    print('LPIPS alex', np.array(lpips_res_alex).mean())
     print('SSIMS', np.array(ssims).mean())
+    print('NEX SSIMS', np.array(nex_ssims).mean())
+    print('R2l SSIMS', np.array(r2l_ssims).mean())
     return rgbs0, rgbs1, depths, depths
 
 
@@ -410,7 +419,8 @@ def create_nerf(args):
     """
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
     embed_rays = Pluecker()
-    pretrain_ckpt = torch.load(args.pretrain_path)
+    if args.pretrain_path is not None:
+        pretrain_ckpt = torch.load(args.pretrain_path)
 
     input_ch_views = 0
     embeddirs_fn = None
@@ -434,7 +444,8 @@ def create_nerf(args):
     #                 n_in=input_ch + input_ch_views, n_out=output_ch, skip='auto')
 
     model_fine.to(device)
-    model_fine.load_state_dict(pretrain_ckpt['network_fn_state_dict'])
+    if args.pretrain_path is not None:
+        model_fine.load_state_dict(pretrain_ckpt['network_fn_state_dict'])
     grad_vars_nerf.append({'params': model_fine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
     grad_vars.append({'params': model_fine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
@@ -447,7 +458,8 @@ def create_nerf(args):
                                 input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
                                 6 * args.N_point_ray_enc,
                                 output_ch=3 * args.N_samples + 3, skips=args.mmnetskips)
-    model_mmray.load_state_dict(pretrain_ckpt['mmr_network_fn_state_dict'])
+    if args.pretrain_path is not None:
+        model_mmray.load_state_dict(pretrain_ckpt['mmr_network_fn_state_dict'])
     grad_vars.append({'params': model_mmray.parameters(),
                      'weight_decay': args.weight_decay, 'lr': args.lrate})
     
@@ -456,7 +468,8 @@ def create_nerf(args):
                                 input_ch=input_ch * args.N_samples if args.mm_emb else
                                 6 * (0+args.N_samples) + 3 * args.num_neighbor * args.N_samples,
                                 output_ch=4 * args.N_samples + 3, skips=args.mmnetskips)
-    model_refine.load_state_dict(pretrain_ckpt['refine_net_state_dict'])
+    if args.pretrain_path is not None:
+        model_refine.load_state_dict(pretrain_ckpt['refine_net_state_dict'])
     grad_vars.append({'params': model_refine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     # Create optimizer

@@ -1,4 +1,4 @@
-expname = leaves_refine_12samples_undist
+expname = leaves_refine_12samples_undist_reg5e8
 pretrain_path = logs_epi_RR/leaves_sampler_e2e_donerf_12samples_undist/500000.tar
 datadir = data/nerf_llff_data_undist/leaves_undistort
 dataset_type = llff
@@ -26,5 +26,5 @@ N_point_ray_enc = 48
 mm_emb = False
 precrop_iters = 0
 precrop_frac = 0.5
-weight_decay = 0e-8
+weight_decay = 5e-8
 rand_crop_size = 128

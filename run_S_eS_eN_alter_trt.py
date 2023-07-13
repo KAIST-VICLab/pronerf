@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '5'
+gpu_n = '6'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -671,8 +671,12 @@ def render_rays(ray_batch, or_ray_batch,
     mm_density_add = torch.gather(mm_density_add, dim =1, index = sort_out[1])
     mm_density_mul = torch.gather(mm_density_mul, dim =1, index = sort_out[1])
 
-    depth_values_3d = 1/(1-depth_values - 1e-5)  #! convert ndc zval to 3d zval
+    t2.record()
+    torch.cuda.synchronize(device=device)
+    print('MM ray time:', t1.elapsed_time(t2))
 
+    t1.record()
+    depth_values_3d = 1/(1-depth_values - 1e-5)  #! convert ndc zval to 3d zval
     num_pts = N_samples
     num_neighbor = kwargs['num_neighbor']
     k_ref = kwargs['num_neighbor']

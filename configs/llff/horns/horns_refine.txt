@@ -1,5 +1,6 @@
-expname = horns_refine_8samples_v2_newplucker
-pretrain_path = logs_epi_RR/horns_sampler_e2e_donerf_12samples_newplucker/500000.tar
+expname = horns_refine_e2e_nerf_12samples
+ft_path = logs_epi_RR/horns_refine_e2e_nerf_12samples/500000.tar
+pretrain_path = logs_epi_RR/horns_sampler_e2e_nerf_12samples/500000.tar
 datadir = ./data/nerf_llff_data/horns
 dataset_type = llff
 

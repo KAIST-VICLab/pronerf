@@ -196,8 +196,8 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             rgb8 = to8b(rgbs[-1])
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
-            filename = os.path.join(savedir, 'err{:03d}.png'.format(i))
-            imageio.imwrite(filename, error)
+            # filename = os.path.join(savedir, 'err{:03d}.png'.format(i))
+            # imageio.imwrite(filename, error)
 
             # rgb8 = to8b(depths[-1]/np.max(depths[-1]))
             # filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))

@@ -1,5 +1,5 @@
-expname = barbershop_refine_12samples_debug
-pretrain_path = logs_donerf/barbershop_sampler_12samples/500000.tar
+expname = barbershop_refine_16samples
+pretrain_path = logs_donerf/barbershop_sampler_16samples/500000.tar
 datadir = barbershop
 dataset_type = donerf
 
@@ -9,7 +9,7 @@ k_ref = 1
 num_neighbor = 4
 
 N_rand = 12288
-N_samples = 12
+N_samples = 16
 N_importance = 0
 
 use_viewdirs = True

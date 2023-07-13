@@ -1,5 +1,6 @@
-expname = fern_refine_12samples_v2_2newplucker
-pretrain_path = logs_epi_RR/fern_sampler_e2e_donerf_12samples_2newplucker/500000.tar
+expname = fern_refine_e2e_nerf_12samples
+ft_path = logs_epi_RR/fern_refine_e2e_nerf_12samples/440000.tar
+pretrain_path = logs_epi_RR/fern_sampler_e2e_nerf_12samples/500000.tar
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
 

@@ -510,6 +510,7 @@ def inverse_warp_rod1_rt2_coords_trt(img, depth, ro1, rd1, c2w2, scale=1., paddi
     Returns:
         Source image warped to the target image plane
     """
+    time1.record()
     B, H, W = depth.shape
     _, C, Hfull, Wfull = img.shape
     # 1. Lift directly into 3D world coordinates [B, 3, H*W]
@@ -523,7 +524,6 @@ def inverse_warp_rod1_rt2_coords_trt(img, depth, ro1, rd1, c2w2, scale=1., paddi
     Y_norm = 2 * Y / (Hfull - 1) - 1  # Idem [B, H*W]
 
 
-    time1.record()
     pixel_coords = torch.stack([X_norm, Y_norm], dim=2)  # [B, H*W, 2]
     src_pixel_coords = pixel_coords.view(B, H, W, 2)
     
