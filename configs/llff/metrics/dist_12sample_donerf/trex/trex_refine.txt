@@ -1,5 +1,5 @@
 expname = trex_refine_12samples_v2
-ft_path = logs_epi_RR/trex_refine_12samples_v2/410000.tar
+ft_path = logs_epi_RR/trex_refine_12samples_v2/420000.tar
 datadir = ./data/nerf_llff_data/trex
 dataset_type = llff
 

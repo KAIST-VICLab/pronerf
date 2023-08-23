@@ -779,7 +779,7 @@ def render_rays(ray_batch, or_ray_batch,
 
     query_points_nerf = rays_o[..., None, :] + rays_d[..., None,
                                                     :] * epi_z_vals[..., :, None]  # ! this is ndc space
-    query_points_nerf = query_points_nerf + (1e-2) * points_offset
+    # query_points_nerf = query_points_nerf + (1e-2) * points_offset
     raw = network_query_fn(query_points_nerf, viewdirs, network_fine)
     iter = kwargs.get('iter', 1e6)
     if not train_nerf:
@@ -1032,40 +1032,41 @@ def train():
         # optimizer_nerf.step()
 
         # ! train sampling net
-        render_kwargs_train['train_nerf'] = True
-        rgb0, rgb1, depth_map, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
-                                                verbose=i < 10, retraw=True,
-                                                **render_kwargs_train)
+        if  (not args.render_test) and (not args.render_only):
+            render_kwargs_train['train_nerf'] = True
+            rgb0, rgb1, depth_map, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+                                                    verbose=i < 10, retraw=True,
+                                                    **render_kwargs_train)
 
-        optimizer.zero_grad()
-        img_loss = img2mse(rgb1, target_s)
-        loss = img_loss
-        if args.a_mmrgb > 0:
-            rgb0_loss = img2mse(rgb0, target_s)
-            mm_rgb_loss = img2mse(extras['mm_rgb'], target_s)
-            loss = loss + args.a_mmrgb * (rgb0_loss + mm_rgb_loss)
+            optimizer.zero_grad()
+            img_loss = img2mse(rgb1, target_s)
+            loss = img_loss
+            if args.a_mmrgb > 0:
+                rgb0_loss = img2mse(rgb0, target_s)
+                mm_rgb_loss = img2mse(extras['mm_rgb'], target_s)
+                loss = loss + args.a_mmrgb * (rgb0_loss + mm_rgb_loss)
 
-        psnr = mse2psnr(img_loss)
-        loss.backward()
-        optimizer.step()
+            psnr = mse2psnr(img_loss)
+            loss.backward()
+            optimizer.step()
 
-        # NOTE: IMPORTANT!
-        ###   update learning rate   ###
-        decay_rate = 0.1
-        decay_steps = args.lrate_decay * 1000
-        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = new_lrate
-        for param_group in optimizer_nerf.param_groups:
-            param_group['lr'] = new_lrate
-        # ################################
+            # NOTE: IMPORTANT!
+            ###   update learning rate   ###
+            decay_rate = 0.1
+            decay_steps = args.lrate_decay * 1000
+            new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = new_lrate
+            for param_group in optimizer_nerf.param_groups:
+                param_group['lr'] = new_lrate
+            # ################################
 
         dt = time.time()-time0
         # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
         #####           end            #####
 
         # Rest is logging
-        if i % args.i_weights == 0 and (not args.render_test) :
+        if i % args.i_weights == 0 and (not args.render_test) and (not args.render_only):
             # print(f'New learning rate: {new_lrate}')
             path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
             if render_kwargs_train['network_fine'] is not None:
@@ -1089,33 +1090,33 @@ def train():
                 }, path)
                 print('Saved checkpoints at', path)
 
-        # if (i % args.i_video == 0 and i > 0) or (args.render_only):
-        #     # Turn on testing mode
-        #     if args.render_only:
-        #         testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
-        #             'test' if args.render_test else 'path', start))
-        #         os.makedirs(testsavedir, exist_ok=True)
-        #         moviebase = os.path.join(
-        #             testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
-        #     else:
-        #         moviebase = os.path.join(
-        #             basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-        #     with torch.no_grad():
-        #         r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=None,savedir=testsavedir)
-        #         rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
-        #     print('Done, saving', rgbs0.shape)
-        #     imageio.mimwrite(moviebase + 'rgb0.mp4',
-        #                      to8b(rgbs0), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'rgb1.mp4',
-        #                      to8b(rgbs1), fps=30, quality=8)
-        #     # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
-        #                      np.percentile(depths, 99)), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
-        #                      np.percentile(depths0, 99)), fps=30, quality=8)
-        #     # print(f'Mean depth {np.mean(depths)}')
-        #     if args.render_only:
-        #         return
+        if (i % args.i_video == 0 and i > 0) or (args.render_only):
+            # Turn on testing mode
+            if args.render_only:
+                testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
+                    'test' if args.render_test else 'path', start))
+                os.makedirs(testsavedir, exist_ok=True)
+                moviebase = os.path.join(
+                    testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
+            else:
+                moviebase = os.path.join(
+                    basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+            with torch.no_grad():
+                r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=None,savedir=testsavedir)
+                rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
+            print('Done, saving', rgbs0.shape)
+            imageio.mimwrite(moviebase + 'rgb0.mp4',
+                             to8b(rgbs0), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'rgb1.mp4',
+                             to8b(rgbs1), fps=30, quality=8)
+            # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
+                             np.percentile(depths, 99)), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
+                             np.percentile(depths0, 99)), fps=30, quality=8)
+            # print(f'Mean depth {np.mean(depths)}')
+            if args.render_only:
+                return
 
         if (i % args.i_testset == 0 and i > 0) or (args.render_test):
             if args.render_test:

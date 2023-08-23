@@ -1,5 +1,9 @@
 import numpy as np
 import os, imageio
+import cv2
+
+from colmap_utils import \
+    read_cameras_binary, read_images_binary, read_points3d_binary
 
 
 ########## Slightly modified version of LLFF data loading code 
@@ -117,10 +121,25 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     print('Loaded image data', imgs.shape, poses[:,-1,0])
     return poses, bds, imgs
 
+def load_llff_cimgs(basedir, factor):   
+    imgdir = os.path.join(basedir, 'c75_images_{}'.format(str(factor)))
+    if not os.path.exists(imgdir):
+        print( imgdir, 'does not exist, returning' )
+        return
     
-            
-            
+    imgfiles = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir)) if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
     
+    def imread(f):
+        if f.endswith('png'):
+            return imageio.imread(f, ignoregamma=True)
+        else:
+            return imageio.imread(f)
+        
+    imgs = [imread(f)[...,:3]/255. for f in imgfiles]
+    imgs = np.stack(imgs, -1)  
+    
+    return np.moveaxis(imgs, -1, 0).astype(np.float32)
+
 
 def normalize(x):
     return x / np.linalg.norm(x)
@@ -240,8 +259,90 @@ def spherify_poses(poses, bds):
     return poses_reset, new_poses, bds
     
 
-def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
+def load_llff_mask_data(basedir, mask_dir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
     
+    poses, bds, imgs = _load_data(basedir, factor=factor) # factor=8 downsamples original imgs by 8x
+    print('Loaded', basedir, bds.min(), bds.max())
+    
+    # Correct rotation matrix ordering and move variable dim to axis 0
+    poses = np.concatenate([poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1)
+    poses = np.moveaxis(poses, -1, 0).astype(np.float32)
+    imgs = np.moveaxis(imgs, -1, 0).astype(np.float32)
+    images = imgs
+    bds = np.moveaxis(bds, -1, 0).astype(np.float32)
+    
+    # Rescale if bd_factor is provided
+    sc = 1. if bd_factor is None else 1./(bds.min() * bd_factor)
+    poses[:,:3,3] *= sc
+    bds *= sc
+    
+    if recenter:
+        poses = recenter_poses(poses)
+        
+    if spherify:
+        poses, render_poses, bds = spherify_poses(poses, bds)
+
+    else:
+        
+        c2w = poses_avg(poses)
+        print('recentered', c2w.shape)
+        print(c2w[:3,:4])
+
+        ## Get spiral
+        # Get average pose
+        up = normalize(poses[:, :3, 1].sum(0))
+
+        # Find a reasonable "focus depth" for this dataset
+        close_depth, inf_depth = bds.min()*.9, bds.max()*5.
+        dt = .75
+        mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
+        focal = mean_dz
+
+        # Get radii for spiral path
+        shrink_factor = .8
+        zdelta = close_depth * .2
+        tt = poses[:,:3,3] # ptstocam(poses[:3,3,:].T, c2w).T
+        rads = np.percentile(np.abs(tt), 90, 0)
+        c2w_path = c2w
+        N_views = 120
+        N_rots = 2
+        if path_zflat:
+#             zloc = np.percentile(tt, 10, 0)[2]
+            zloc = -close_depth * .1
+            c2w_path[:3,3] = c2w_path[:3,3] + zloc * c2w_path[:3,2]
+            rads[2] = 0.
+            N_rots = 1
+            N_views/=2
+
+        # Generate poses for spiral path
+        render_poses = render_path_spiral(c2w_path, up, rads, focal, zdelta, zrate=.5, rots=N_rots, N=N_views)
+        
+        
+    render_poses = np.array(render_poses).astype(np.float32)
+
+    c2w = poses_avg(poses)
+    print('Data:')
+    print(poses.shape, images.shape, bds.shape)
+    
+    dists = np.sum(np.square(c2w[:3,3] - poses[:,:3,3]), -1)
+    i_test = np.argmin(dists)
+    print('HOLDOUT view is', i_test)
+    
+    images = images.astype(np.float32)
+    poses = poses.astype(np.float32)
+
+    c_masks = []
+
+    for i in range(render_poses.shape[0]):
+        c_mask_path = os.path.join(mask_dir, '{}.png'.format(str(i).zfill(3)))
+        c_mask = cv2.imread(c_mask_path, cv2.IMREAD_GRAYSCALE)
+        c_mask = (c_mask/255.0).astype(np.float32)
+        c_masks.append(c_mask)
+
+    c_masks = np.stack(c_masks, axis = 0)
+    return c_masks, poses, bds, render_poses, i_test
+
+def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
 
     poses, bds, imgs = _load_data(basedir, factor=factor) # factor=8 downsamples original imgs by 8x
     print('Loaded', basedir, bds.min(), bds.max())
@@ -315,7 +416,7 @@ def load_llff_data(basedir, factor=8, recenter=True, bd_factor=.75, spherify=Fal
 
     return images, poses, bds, render_poses, i_test
 
-def load_llff_data_infer(basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False):
+def load_llff_data_infer(basedir, factor=8, recenter=True, bd_factor=.75, spherify=False, path_zflat=False, num_neighbor=None, llffhold=8):
     
 
     poses, bds, imgs = _load_data(basedir, factor=factor) # factor=8 downsamples original imgs by 8x
@@ -388,37 +489,56 @@ def load_llff_data_infer(basedir, factor=8, recenter=True, bd_factor=.75, spheri
     images = images.astype(np.float32)
     poses = poses.astype(np.float32)
 
-    N_VIEWS = 4
+    i_test = np.arange(images.shape[0])[::llffhold]
+    i_train = np.array([i for i in np.arange(int(images.shape[0])) if (i not in i_test)])
 
-    # # full views
-    # i_test = np.arange(images.shape[0])[::8]
-    # i_train = np.array([i for i in np.arange(int(images.shape[0])) if
-    #             (i not in i_test)])
+    raw_i_ref = []
+
+    # load unsorted colmap data
+    imdata = read_images_binary(os.path.join(basedir, 'sparse/0/images.bin'))
+    imdata = dict(sorted(imdata.items(), key=lambda item: item[1].name))
+
+    # sort imdata
+    index_mapping = {}
+
+    # find the mapping of i_train image and image_ids in colmap
+    for i, k in enumerate(imdata):
+        im = imdata[k]
+        index_mapping[im.id] = i
+
+    pts3d = read_points3d_binary(os.path.join(basedir, 'sparse/0/points3D.bin'))
+    visibilities = np.zeros((len(i_train), len(pts3d)))
+    for i, k in enumerate(pts3d):
+        for j in pts3d[k].image_ids:
+            split_id = index_mapping[j]
+            if split_id in i_train:
+                train_id = list(i_train).index(split_id) # find the order of this id in train list
+                visibilities[train_id, i] = 1
+
+    # start greedy algorithm
+    # for _ in range(num_neighbor):
+    
+    num_points = 1000000
+    # while num_points >= 0.01*len(pts3d):
+    for _ in range(num_neighbor):
+        total_visible_points = visibilities.sum(-1)
+        most_visible = np.argmax(total_visible_points)
+        
+        raw_i_ref.append(most_visible)
+        num_points = total_visible_points[most_visible]
+        if total_visible_points[most_visible] <= 0:
+            print('warnings 0 point found !')
+            breakpoint()
+        print('Choose img {} with {} points'.format(i_train[most_visible], total_visible_points[most_visible]))
+
+        # update visible list
+        visibilities = visibilities - visibilities[most_visible][None]
+        visibilities[visibilities < 0] = 0
+    print('Total ref views: {}/{}'.format(len(raw_i_ref), len(i_train)))
+    i_ref = i_train[raw_i_ref]
+
+    # print('Choose full view!')
     # i_ref = i_train
-
-    # # random N_VIEWS views
-    # i_test = np.arange(images.shape[0])[::8]
-    # i_train = np.array([i for i in np.arange(int(images.shape[0])) if
-    #             (i not in i_test)])
-    # i_ref = i_train[np.random.choice(i_train.shape[0], N_VIEWS)]
-
-    # # N_VIEWS near views
-    # near_order_i = np.argsort(dists)
-    # i_test = np.arange(images.shape[0])[::8]
-    # i_train = np.array([i for i in near_order_i if (i not in i_test)])
-    # i_ref = i_train[:N_VIEWS]
-
-    # N_VIEWS far views
-    near_order_i = np.argsort(dists)
-    i_test = np.arange(images.shape[0])[::8]
-    i_train = np.array([i for i in near_order_i if (i not in i_test)])
-    i_ref = i_train[-N_VIEWS:]
-
-    # # half near half far
-    # near_order_i = np.argsort(dists)
-    # i_test = np.arange(images.shape[0])[::8]
-    # i_train = np.array([i for i in near_order_i if (i not in i_test)])
-    # i_ref = np.concatenate([i_train[:N_VIEWS//2], i_train[-N_VIEWS//2:]])
 
     return images, poses, bds, render_poses, i_test, i_ref
 

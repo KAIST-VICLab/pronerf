@@ -1,5 +1,5 @@
 expname = orchids_refine_e2e_nerf_12samples
-ft_path = logs_epi_RR/orchids_refine_e2e_nerf_12samples/130000.tar
+ft_path = logs_epi_RR/orchids_refine_e2e_nerf_12samples/260000.tar
 datadir = ./data/nerf_llff_data/orchids
 dataset_type = llff
 

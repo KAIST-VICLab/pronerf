@@ -1,5 +1,5 @@
-expname = flower_refine_12samples_v2_2
-ft_path = logs_epi_RR/flower_refine_12samples_v2_2/490000.tar
+expname = flower_refine_12samples_v2
+ft_path = logs_epi_RR/flower_refine_12samples_v2/490000.tar
 datadir = ./data/nerf_llff_data/flower
 dataset_type = llff
 

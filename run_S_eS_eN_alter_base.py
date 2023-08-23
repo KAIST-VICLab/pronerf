@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '4'
+gpu_n = '7'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -474,13 +474,13 @@ def create_nerf(args):
     model_mmray = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                 input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
                                 6 * args.N_point_ray_enc,
-                                output_ch=3 * args.N_samples + 3, skips=args.mmnetskips)
+                                output_ch=3 * args.N_samples + 3 + 2*args.N_samples, skips=args.mmnetskips)
     s_grad_vars.append({'params': model_mmray.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     model_refine = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                 input_ch=input_ch * args.N_samples if args.mm_emb else
                                 6 * (0+args.N_samples) + 3 * args.num_neighbor * args.N_samples,
-                                output_ch=4 * args.N_samples + 3, skips=args.mmnetskips)
+                                output_ch=4 * args.N_samples + 3 , skips=args.mmnetskips)
     s_grad_vars.append({'params': model_refine.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     # Create optimizers
@@ -584,7 +584,7 @@ def compute_query_points_from_rays(
 
 
 def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False, mm_density_add=None,
-                mm_density_mul=None, iter=1e6):
+                mm_density_mul=None, iter=1e6, color_shift = None, color_scale = None):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -620,6 +620,8 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         # if iter > 200000:
         alpha = alpha * torch.relu(mm_density_mul)
             # alpha = alpha*torch.sigmoid(mm_density_mul)
+        
+        rgb = rgb*color_scale + color_shift
     else:
         alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
@@ -686,15 +688,21 @@ def render_rays(ray_batch, or_ray_batch,
     else:
         with torch.no_grad():
             min_max_rays = min_max_ray_net(plucker_pts)
-    mm_rgb = torch.sigmoid(min_max_rays[:, 3 * N_samples:])
+    mm_rgb = torch.sigmoid(min_max_rays[:, 3 * N_samples:3 * N_samples+3])
     mm_density_add = min_max_rays[:, N_samples:2 * N_samples]
     mm_density_mul = min_max_rays[:, 2 * N_samples:3 * N_samples]
+
+    color_shift = min_max_rays[:,3 * N_samples+3:4 * N_samples+3].view(N_rays, N_samples)
+    color_scale = min_max_rays[:,4 * N_samples+3:].view(N_rays, N_samples)
 
     depth_values = torch.sigmoid(min_max_rays[:, :N_samples]) * (far - near) + near  # B, Nsamples, H, W
     sort_out = torch.sort(depth_values, dim=-1)
     depth_values = sort_out[0]  # ! depth values are sorted, ndc space
     mm_density_add = torch.gather(mm_density_add, dim=1, index=sort_out[1])
     mm_density_mul = torch.gather(mm_density_mul, dim=1, index=sort_out[1])
+
+    color_shift = torch.gather(color_shift, dim=1, index=sort_out[1])[...,None]
+    color_scale = torch.gather(color_scale, dim=1, index=sort_out[1])[...,None]
 
     depth_values_3d = 1 / (1 - depth_values - 1e-6)  # ! convert ndc zval to 3d zval
 
@@ -846,7 +854,7 @@ def render_rays(ray_batch, or_ray_batch,
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, refine_depth_values, rays_d, raw_noise_std,
                                                                      white_bkgd, pytest=pytest,
                                                                      mm_density_add=mm_density_add,
-                                                                     mm_density_mul=mm_density_mul, iter=iter)
+                                                                     mm_density_mul=mm_density_mul, iter=iter, color_shift=color_shift, color_scale=color_scale)
     else:
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, refine_depth_values, rays_d, raw_noise_std,
                                                                      white_bkgd, pytest=pytest, iter=iter)
@@ -1151,33 +1159,33 @@ def train():
             }, path)
             print('Saved checkpoints at', path)
 
-        if (i % args.i_video == 0 and i > 0) or (args.render_only):
-            # Turn on testing mode
-            with torch.no_grad():
-                r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
-                rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
-            print('Done, saving', rgbs0.shape)
-            if args.render_only:
-                testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
-                    'test' if args.render_test else 'path', start))
-                os.makedirs(testsavedir, exist_ok=True)
-                moviebase = os.path.join(
-                    testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
-            else:
-                moviebase = os.path.join(
-                    basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-            imageio.mimwrite(moviebase + 'rgb0.mp4',
-                             to8b(rgbs0), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'rgb1.mp4',
-                             to8b(rgbs1), fps=30, quality=8)
-            # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
-                             np.percentile(depths, 99)), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
-                             np.percentile(depths0, 99)), fps=30, quality=8)
-            # print(f'Mean depth {np.mean(depths)}')
-            if args.render_only:
-                return
+        # if (i % args.i_video == 0 and i > 0) or (args.render_only):
+        #     # Turn on testing mode
+        #     with torch.no_grad():
+        #         r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
+        #         rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
+        #     print('Done, saving', rgbs0.shape)
+        #     if args.render_only:
+        #         testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
+        #             'test' if args.render_test else 'path', start))
+        #         os.makedirs(testsavedir, exist_ok=True)
+        #         moviebase = os.path.join(
+        #             testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
+        #     else:
+        #         moviebase = os.path.join(
+        #             basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+        #     imageio.mimwrite(moviebase + 'rgb0.mp4',
+        #                      to8b(rgbs0), fps=30, quality=8)
+        #     imageio.mimwrite(moviebase + 'rgb1.mp4',
+        #                      to8b(rgbs1), fps=30, quality=8)
+        #     # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
+        #     imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
+        #                      np.percentile(depths, 99)), fps=30, quality=8)
+        #     imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
+        #                      np.percentile(depths0, 99)), fps=30, quality=8)
+        #     # print(f'Mean depth {np.mean(depths)}')
+        #     if args.render_only:
+        #         return
 
         if (i % args.i_testset == 0 and i > 0) or (args.render_test):
             if args.render_test:

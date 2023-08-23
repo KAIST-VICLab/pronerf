@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from tqdm import tqdm, trange
 from ptflops import flops_counter
 import inverse_warp
-# import lpips
+import line_profiler
 
 import matplotlib.pyplot as plt
 
@@ -29,6 +29,9 @@ from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
 
+PROFILING = False
+if PROFILING:
+    os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
@@ -194,7 +197,6 @@ def batchify(fn, chunk):
         return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
     return ret
 
-
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
@@ -338,11 +340,12 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 
 
         # Step 4: Measure inference time
-        t1.record()
-        rgb0, rgb1, depth_map, _ = render(rays, or_rays, sh, **render_kwargs)
-        t2.record()
-        torch.cuda.synchronize(device=device)
-        print('Render path time:', t1.elapsed_time(t2))
+        for _ in range(20):
+            t1.record()
+            rgb0, rgb1, depth_map, _ = render(rays, or_rays, sh, **render_kwargs)
+            t2.record()
+            torch.cuda.synchronize(device=device)
+            print('Render path time:', t1.elapsed_time(t2))
 
         total_macs = 0
         if render_kwargs['count_flops']:
@@ -513,10 +516,9 @@ def create_nerf(args):
         model_fine.load_state_dict(ckpt['network_fine_state_dict'])
 
     # export to onnx
-    # model2onnx(model_fine, in_ch = [input_ch, input_ch_views], savedir = os.path.join(args.basedir, args.expname), model_name='nerf', batch_size=1)
+    model2onnx(model_fine, in_ch = [input_ch, input_ch_views], savedir = os.path.join(args.basedir, args.expname), model_name='nerf', batch_size=1)
     # model2onnx(model_mmray, in_ch = (6) * args.N_point_ray_enc, savedir = os.path.join(args.basedir, args.expname), model_name='minmaxrays_net',batch_size=1)
     # model2onnx(model_refine, in_ch = (3*args.num_neighbor) * args.N_samples + 6*(args.N_samples), savedir = os.path.join(args.basedir, args.expname), model_name='refine_net',batch_size=1)
-    # breakpoint()
     ##########################
 
     # # TRT Engine
@@ -606,16 +608,14 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
     dists = z_vals[...,1:] - z_vals[...,:-1]
-    # dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
     inf_dist = torch.ones(dists[..., :1].shape, device = dists.device)*(1e10)
     dists = torch.cat([dists, inf_dist], -1)  # [N_rays, N_samples]
 
     dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
-    noise = 0.
 
-    alpha = raw2alpha(raw[...,3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
+    alpha = raw2alpha(raw[...,3] + mm_density_add, dists)  # [N_rays, N_samples]
     alpha = alpha*torch.relu(mm_density_mul)
 
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
@@ -625,12 +625,9 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
     acc_map = torch.sum(weights, -1)
 
-    if white_bkgd:
-        rgb_map = rgb_map + (1.-acc_map[...,None])
-
     return rgb_map, disp_map, acc_map, weights, depth_map
 
-
+# @profile
 def render_rays(ray_batch, or_ray_batch,
                 network_fn,
                 network_query_fn,
@@ -657,9 +654,6 @@ def render_rays(ray_batch, or_ray_batch,
     bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
     near, far = bounds[...,0], bounds[...,1] # [-1,1]
 
-    t1, t2 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-    
-    t1.record()
     if kwargs['use_trt']:
         _, mm_density_add, mm_density_mul, depth_values = kwargs['mm_engine'].run()
     else:
@@ -671,11 +665,6 @@ def render_rays(ray_batch, or_ray_batch,
     mm_density_add = torch.gather(mm_density_add, dim =1, index = sort_out[1])
     mm_density_mul = torch.gather(mm_density_mul, dim =1, index = sort_out[1])
 
-    t2.record()
-    torch.cuda.synchronize(device=device)
-    print('MM ray time:', t1.elapsed_time(t2))
-
-    t1.record()
     depth_values_3d = 1/(1-depth_values - 1e-5)  #! convert ndc zval to 3d zval
     num_pts = N_samples
     num_neighbor = kwargs['num_neighbor']
@@ -704,13 +693,10 @@ def render_rays(ray_batch, or_ray_batch,
 
     if kwargs['use_trt']:
         kwargs['refine_engine'].bind_input(refine_input)
-        refine_depth_values, refine_rgb, points_offset = kwargs['refine_engine'].run()
+        refine_depth_values, _, points_offset = kwargs['refine_engine'].run()
     else:
-        refine_depth_values, refine_rgb, points_offset = refine_net(refine_input)
+        refine_depth_values, _, points_offset = refine_net(refine_input)
 
-    t2.record()
-    torch.cuda.synchronize(device=device)
-    print('Epi sampler time:', t1.elapsed_time(t2))
     
     points_offset = points_offset.view(N_rays, N_samples,3)
 

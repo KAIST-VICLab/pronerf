@@ -1,0 +1,27 @@
+expname = ship_16sampler_mipenc
+datadir = ./data/nerf_synthetic/ship
+dataset_type = blender
+
+render_only = False
+
+N_samples = 16
+N_importance = 0
+N_rand = 4096
+N_n = 4
+
+mm_emb = False
+weight_decay = 0e-8
+use_viewdirs = True
+raw_noise_std = 1e0
+white_bkgd = True
+lrate = 5e-4
+
+a_mmrgb = 1.0
+a_mmdisp = 0.0
+mmnetdepth = 6
+mmnetwidth = 256
+mmnetskips = [1000]
+N_point_ray_enc = 49
+
+half_res = False
+precrop_iters = 500

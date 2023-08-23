@@ -1,0 +1,28 @@
+network:
+    white_bg: 1
+    black_bg: 0
+
+    nSamples : 32
+
+    aabb: [[-2.0, -2.0, -2.0], [2.0, 2.0, 2.0]]
+
+    N_voxel_init : 2097156 # 128**3
+    N_voxel_final : 27000000 # 300**3
+    upsamp_list: [4000,6000,8000,10000,12000]
+    update_AlphaMask_list : []
+    lr_upsample_reset: True
+
+    n_lamb_sigma : [16,16,16]
+    n_lamb_sh : [48,48,48]
+
+    shadingMode : MLP_Fea
+    fea2denseAct : softplus
+
+    view_pe : 2
+    fea_pe : 2
+
+    L1_weight_inital : 8e-5
+    L1_weight_rest : 4e-5
+    rm_weight_mask_thre : 1e-4
+
+

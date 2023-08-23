@@ -319,7 +319,7 @@ class NeRFEngine(object):
         print("Allocating buffer for engine I/O")
         outputs = []
         bindings = []
-        # print("Batch size: ", self.engine.max_batch_size)
+
         out_ptr = 0
         for binding in self.engine:
             size = trt.volume(self.engine.get_binding_shape(binding)) * self.engine.max_batch_size
@@ -361,7 +361,6 @@ class NeRFEngine(object):
 
         # NOTE OUT GPU TENSOR
         self.out_ptrs = [self.out]
-        # self.out_ptrs = [self.hm, self.features]
         try:
             self.engine = self._load_engine(load_model)
             self.context = self.engine.create_execution_context()
@@ -385,7 +384,6 @@ class NeRFEngine(object):
         self.bindings[1] = self.input_dir_gpu.gpudata 
 
     def run(self):
-        # self.stream.synchronize()
         # NOTE execute engine
         self.context.execute_async_v2(
             bindings=self.bindings,

@@ -1,5 +1,5 @@
 expname = fern_refine_12samples_v2
-ft_path = logs_epi_RR/fern_refine_12samples_v2/500000.tar
+ft_path = logs_epi_RR/fern_refine_12samples_v2/490000.tar
 datadir = ./data/nerf_llff_data/fern
 dataset_type = llff
 

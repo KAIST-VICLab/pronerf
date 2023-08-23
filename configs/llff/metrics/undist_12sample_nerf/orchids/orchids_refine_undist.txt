@@ -1,5 +1,5 @@
-expname = orchids_refine_12samples_undist_reg5e8
-ft_path = logs_epi_RR/orchids_refine_12samples_undist_reg5e8/500000.tar
+expname = orchids_refine_12samples_undist
+ft_path = logs_epi_RR/orchids_refine_12samples_undist/500000.tar
 datadir = data/nerf_llff_data_undist/orchids_undistort
 dataset_type = llff
 

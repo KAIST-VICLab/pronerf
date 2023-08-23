@@ -1,5 +1,4 @@
 import torch
-# torch.autograd.set_detect_anomaly(True)
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
@@ -11,11 +10,128 @@ from scipy import signal
 import math
 import re
 TINY_NUMBER = 1e-6  # float32 only has 7 decimal digits precision
+# import tinycudann as tcnn
+from typing import Optional, Set, Tuple, Union
 
+from dataclasses import dataclass
+from jaxtyping import Float
+from torch import Tensor
+import jax.numpy as jnp
+import jax
 
+def rays_to_gaussian_embed(tdist, origins, directions, radii, near, far):
+    mids = .5 * (tdist[..., 1:] + tdist[..., :-1])
+    t1 = torch.cat([mids, 0.5 * (far + tdist[..., -1:])], -1)  # upper cat far
+    t0 = torch.cat([0.5 * (near + tdist[..., :1]), mids], -1)  # lower cat near
+
+    mu = (t0 + t1) / 2  # The average of the two `t` values.
+    hw = (t1 - t0) / 2  # The half-width of the two `t` values.
+
+    eps = 1e-5
+
+    t_mean = mu + (2 * mu * hw**2) / torch.clamp(3 * mu**2 + hw**2, min=eps)
+    denom = torch.clamp(3 * mu**2 + hw**2, min=eps)
+    t_var = (hw**2) / 3 - (4 / 15) * hw**4 * (12 * mu**2 - hw**2) / denom**2
+    r_var = (mu**2) / 4 + (5 / 12) * hw**2 - (4 / 15) * (hw**4) / denom
+
+    r_var *= radii**2
+
+    mean = directions[..., None, :] * t_mean[..., None]
+    d_mag_sq = torch.clamp(torch.sum(directions**2, dim=-1, keepdims=True), min = 1e-10)
+
+    d_outer = directions[..., :, None] * directions[..., None, :]
+    eye = torch.eye(directions.shape[-1])
+    null_outer = eye - directions[..., :, None] * (directions / d_mag_sq)[..., None, :]
+    t_cov = t_var[..., None, None] * d_outer[..., None, :, :]
+    xy_cov = r_var[..., None, None] * null_outer[..., None, :, :]
+    cov = t_cov + xy_cov
+
+    mean = mean + origins[..., None, :]
+    return mean, cov
+
+def lift_and_diagonalize(mean, cov, basis):
+    """Project `mean` and `cov` onto basis and diagonalize the projected cov."""
+    fn_mean = torch.matmul(mean, basis)
+    fn_cov_diag = torch.sum(basis * torch.matmul(cov, basis), dim=-2)
+    return fn_mean, fn_cov_diag
+
+def integrated_pos_enc(mean, var, min_deg, max_deg):
+    """Encode `x` with sinusoids scaled by 2^[min_deg, max_deg).
+
+    Args:
+      mean: tensor, the mean coordinates to be encoded
+      var: tensor, the variance of the coordinates to be encoded.
+      min_deg: int, the min degree of the encoding.
+      max_deg: int, the max degree of the encoding.
+
+    Returns:
+      encoded: jnp.ndarray, encoded variables.
+    """
+    scales = 2**torch.arange(min_deg, max_deg)
+    shape = mean.shape[:-1] + (-1,)
+    scaled_mean = torch.reshape(mean[..., None, :] * scales[:, None], shape)
+    scaled_var = torch.reshape(var[..., None, :] * scales[:, None]**2, shape)
+
+    return expected_sin(
+        torch.cat([scaled_mean, scaled_mean + 0.5 * torch.pi], dim=-1),
+        torch.cat([scaled_var] * 2, dim=-1))
+
+def expected_sin(mean, var):
+    """Compute the mean of sin(x), x ~ N(mean, var)."""
+    return torch.exp(-0.5 * var) * torch.sin(mean)  # large var -> small value.
+
+def color_correct(img, ref, num_iters=5, eps=0.5 / 255):
+    """Warp `img` to match the colors in `ref_img`."""
+    if img.shape[-1] != ref.shape[-1]:
+        raise ValueError(
+            f'img\'s {img.shape[-1]} and ref\'s {ref.shape[-1]} channels must match'
+        )
+    num_channels = img.shape[-1]
+    img_mat = img.reshape([-1, num_channels])
+    ref_mat = ref.reshape([-1, num_channels])
+    is_unclipped = lambda z: (z >= eps) & (z <= (1 - eps))  # z \in [eps, 1-eps].
+    mask0 = is_unclipped(img_mat)
+    # Because the set of saturated pixels may change after solving for a
+    # transformation, we repeatedly solve a system `num_iters` times and update
+    # our estimate of which pixels are saturated.
+    for _ in range(num_iters):
+        # Construct the left hand side of a linear system that contains a quadratic
+        # expansion of each pixel of `img`.
+        a_mat = []
+        for c in range(num_channels):
+            a_mat.append(img_mat[:, c:(c + 1)] * img_mat[:, c:])  # Quadratic term.
+        a_mat.append(img_mat)  # Linear term.
+        a_mat.append(jnp.ones_like(img_mat[:, :1]))  # Bias term.
+        a_mat = jnp.concatenate(a_mat, axis=-1)
+        warp = []
+        for c in range(num_channels):
+            # Construct the right hand side of a linear system containing each color
+            # of `ref`.
+            b = ref_mat[:, c]
+            # Ignore rows of the linear system that were saturated in the input or are
+            # saturated in the current corrected color estimate.
+            mask = mask0[:, c] & is_unclipped(img_mat[:, c]) & is_unclipped(b)
+            ma_mat = jnp.where(mask[:, None], a_mat, 0)
+            mb = jnp.where(mask, b, 0)
+            # Solve the linear system. We're using the np.lstsq instead of jnp because
+            # it's significantly more stable in this case, for some reason.
+            w = np.linalg.lstsq(ma_mat, mb, rcond=-1)[0]
+            assert jnp.all(jnp.isfinite(w))
+            warp.append(w)
+        warp = jnp.stack(warp, axis=-1)
+        # Apply the warp to update img_mat.
+        img_mat = jnp.clip(
+            jnp.matmul(a_mat, warp, precision=jax.lax.Precision.HIGHEST), 0, 1)
+    corrected_img = jnp.reshape(img_mat, img.shape)
+    return corrected_img
+    
 # Misc
 img2mse = lambda x, y : torch.mean((x - y) ** 2)
 mse2psnr = lambda x : -10. * torch.log10(x)
+
+img2mse_np = lambda x, y : np.mean((x - y) ** 2)
+mse2psnr_np = lambda x : -10. * np.log10(x)
+
 to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
 
 __LPIPS__ = {}
@@ -25,12 +141,12 @@ def init_lpips(net_name, device):
     print(f'init_lpips: lpips_{net_name}')
     return lpips.LPIPS(net=net_name, version='0.1').eval().to(device)
 
-def rgb_lpips(np_gt, np_im, net_name, device):
+def rgb_lpips(np_gt, np_im, net_name, device, normalize = True):
     if net_name not in __LPIPS__:
         __LPIPS__[net_name] = init_lpips(net_name, device)
     gt = torch.from_numpy(np_gt).permute([2, 0, 1]).contiguous().to(device)
     im = torch.from_numpy(np_im).permute([2, 0, 1]).contiguous().to(device)
-    return __LPIPS__[net_name](gt, im, normalize=True).item()
+    return __LPIPS__[net_name](gt, im, normalize=normalize).item()
 
 def img2ssim(img0, img1, max_val=1,
              filter_size=11,
@@ -157,6 +273,242 @@ def intersect_sphere(rays_o, rays_d, origin = None, radius = 2.5):
     # sort t1 and t2 in order
     return t[...,0][...,None], t[...,1][...,None]
 
+@dataclass
+class SceneBox:
+    """Data to represent the scene box."""
+
+    aabb: Float[Tensor, "2 3"]
+    """aabb: axis-aligned bounding box.
+    aabb[0] is the minimum (x,y,z) point.
+    aabb[1] is the maximum (x,y,z) point."""
+
+    def get_diagonal_length(self):
+        """Returns the longest diagonal length."""
+        diff = self.aabb[1] - self.aabb[0]
+        length = torch.sqrt((diff**2).sum() + 1e-20)
+        return length
+
+    def get_center(self):
+        """Returns the center of the box."""
+        diff = self.aabb[1] - self.aabb[0]
+        return self.aabb[0] + diff / 2.0
+
+    def get_centered_and_scaled_scene_box(self, scale_factor: Union[float, torch.Tensor] = 1.0):
+        """Returns a new box that has been shifted and rescaled to be centered
+        about the origin.
+
+        Args:
+            scale_factor: How much to scale the camera origins by.
+        """
+        return SceneBox(aabb=(self.aabb - self.get_center()) * scale_factor)
+
+    @staticmethod
+    def get_normalized_positions(positions: Float[Tensor, "*batch 3"], aabb: Float[Tensor, "2 3"]):
+        """Return normalized positions in range [0, 1] based on the aabb axis-aligned bounding box.
+
+        Args:
+            positions: the xyz positions
+            aabb: the axis-aligned bounding box
+        """
+        aabb_lengths = aabb[1] - aabb[0]
+        normalized_positions = (positions - aabb[0]) / aabb_lengths
+        return normalized_positions
+
+    @staticmethod
+    def from_camera_poses(poses: Float[Tensor, "*batch 3 4"], scale_factor: float) -> "SceneBox":
+        """Returns the instance of SceneBox that fully envelopes a set of poses
+
+        Args:
+            poses: tensor of camera pose matrices
+            scale_factor: How much to scale the camera origins by.
+        """
+        xyzs = poses[..., :3, -1]
+        aabb = torch.stack([torch.min(xyzs, dim=0)[0], torch.max(xyzs, dim=0)[0]])
+        return SceneBox(aabb=aabb * scale_factor)
+
+
+class SHEncoding(nn.Module):
+    """Spherical harmonic encoding
+
+    Args:
+        levels: Number of spherical harmonic levels to encode.
+    """
+
+    def __init__(self, levels: int = 4) -> None:
+        super().__init__()
+
+        if levels <= 0 or levels > 4:
+            raise ValueError(f"Spherical harmonic encoding only supports 1 to 4 levels, requested {levels}")
+
+        self.levels = levels
+
+        self.tcnn_encoding = None
+
+        encoding_config = {
+            "otype": "SphericalHarmonics",
+            "degree": levels,
+        }
+        self.tcnn_encoding = tcnn.Encoding(
+            n_input_dims=3,
+            encoding_config=encoding_config,
+        )
+
+    def get_out_dim(self) -> int:
+        return self.levels**2
+
+    def forward(self, in_tensor):
+        return self.tcnn_encoding(in_tensor)
+
+class HashEncoding(nn.Module):
+    """Hash encoding
+
+    Args:
+        num_levels: Number of feature grids.
+        min_res: Resolution of smallest feature grid.
+        max_res: Resolution of largest feature grid.
+        log2_hashmap_size: Size of hash map is 2^log2_hashmap_size.
+        features_per_level: Number of features per level.
+        hash_init_scale: Value to initialize hash grid.
+        implementation: Implementation of hash encoding. Fallback to torch if tcnn not available.
+        interpolation: Interpolation override for tcnn hashgrid. Not supported for torch unless linear.
+    """
+
+    def __init__(
+        self,
+        num_levels: int = 16,
+        min_res: int = 16,
+        max_res: int = 1024,
+        log2_hashmap_size: int = 19,
+        features_per_level: int = 2,
+        hash_init_scale: float = 0.001,
+    ) -> None:
+        super().__init__()
+        self.num_levels = num_levels
+        self.features_per_level = features_per_level
+        self.log2_hashmap_size = log2_hashmap_size
+        self.hash_table_size = 2**log2_hashmap_size
+
+        levels = torch.arange(num_levels)
+        growth_factor = np.exp((np.log(max_res) - np.log(min_res)) / (num_levels - 1)) if num_levels > 1 else 1
+        self.scalings = torch.floor(min_res * growth_factor**levels)
+
+        self.hash_offset = levels * self.hash_table_size
+
+        self.tcnn_encoding = None
+        self.hash_table = torch.empty(0)
+
+        encoding_config = {
+            "otype": "HashGrid",
+            "n_levels": self.num_levels,
+            "n_features_per_level": self.features_per_level,
+            "log2_hashmap_size": self.log2_hashmap_size,
+            "base_resolution": min_res,
+            "per_level_scale": growth_factor,
+        }
+
+        self.tcnn_encoding = tcnn.Encoding(
+            n_input_dims=3,
+            encoding_config=encoding_config,
+        )
+
+
+    def get_out_dim(self) -> int:
+        return self.num_levels * self.features_per_level
+
+    def forward(self, in_tensor):
+        return self.tcnn_encoding(in_tensor)
+    
+def activation_to_tcnn_string(activation: Union[nn.Module, None]) -> str:
+    """Converts a torch.nn activation function to a string that can be used to
+    initialize a TCNN activation function.
+
+    Args:
+        activation: torch.nn activation function
+    Returns:
+        str: TCNN activation function string
+    """
+
+    if isinstance(activation, nn.ReLU):
+        return "ReLU"
+    if isinstance(activation, nn.LeakyReLU):
+        return "Leaky ReLU"
+    if isinstance(activation, nn.Sigmoid):
+        return "Sigmoid"
+    if isinstance(activation, nn.Softplus):
+        return "Softplus"
+    if isinstance(activation, nn.Tanh):
+        return "Tanh"
+    if isinstance(activation, type(None)):
+        return "None"
+    tcnn_documentation_url = "https://github.com/NVlabs/tiny-cuda-nn/blob/master/DOCUMENTATION.md#activation-functions"
+    raise ValueError(
+        f"TCNN activation {activation} not supported for now.\nSee {tcnn_documentation_url} for TCNN documentation."
+    )
+    
+class TCNNMLP(nn.Module):
+    """Multilayer perceptron
+
+    Args:
+        in_dim: Input layer dimension
+        num_layers: Number of network layers
+        layer_width: Width of each MLP layer
+        out_dim: Output layer dimension. Uses layer_width if None.
+        activation: intermediate layer activation function.
+        out_activation: output activation function.
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        num_layers: int,
+        layer_width: int,
+        out_dim: Optional[int] = None,
+        skip_connections: Optional[Tuple[int]] = None,
+        activation: Optional[nn.Module] = nn.ReLU(),
+        out_activation: Optional[nn.Module] = None,
+    ) -> None:
+        super().__init__()
+        self.in_dim = in_dim
+        assert self.in_dim > 0
+        self.out_dim = out_dim if out_dim is not None else layer_width
+        self.num_layers = num_layers
+        self.layer_width = layer_width
+        self.skip_connections = skip_connections
+        self._skip_connections: Set[int] = set(skip_connections) if skip_connections else set()
+        self.activation = activation
+        self.out_activation = out_activation
+        self.net = None
+
+        self.tcnn_encoding = None
+
+        activation_str = activation_to_tcnn_string(activation)
+        output_activation_str = activation_to_tcnn_string(out_activation)
+
+        if layer_width in [16, 32, 64, 128]:
+            network_config = {
+                "otype": "FullyFusedMLP",
+                "activation": activation_str,
+                "output_activation": output_activation_str,
+                "n_neurons": layer_width,
+                "n_hidden_layers": num_layers - 1,
+            }
+        else:
+            network_config = {
+                "otype": "CutlassMLP",
+                "activation": activation_str,
+                "output_activation": output_activation_str,
+                "n_neurons": layer_width,
+                "n_hidden_layers": num_layers - 1,
+            }
+
+        self.tcnn_encoding = tcnn.Network(
+            n_input_dims=in_dim,
+            n_output_dims=out_dim,
+            network_config=network_config,
+        )
+
+    def forward(self, in_tensor):
+        return self.tcnn_encoding(in_tensor)
 
 class BaseContract(nn.Module):
     def __init__(
@@ -318,6 +670,9 @@ class Embedder(nn.Module):
             embed.append(torch.cos(inputs*freq))
         return torch.cat(embed, -1)
 
+def get_N_embedder(N_emb):
+    embedd_model = EmbedModel(D=3, W=N_emb * 3, input_ch=3, output_ch=N_emb)
+    return embedd_model, N_emb
 
 def get_embedder(multires, i=0):
     if i == -1:
@@ -416,7 +771,23 @@ class NeRFEmbedTRT(nn.Module):
 
         return outputs
 
+class Linear_var(nn.Module):
+    def __init__(self, in_unit, out_unit):
+        super(Linear_var, self).__init__()
+        self.linear = nn.Linear(in_unit + 1, out_unit)
 
+    def forward(self, x):
+        return self.linear(torch.cat((x, torch.abs(torch.var(x, dim=-1, keepdim=True))), -1))
+    
+class Linear_norm(nn.Module):
+    def __init__(self, in_unit, out_unit):
+        super(Linear_norm, self).__init__()
+        self.linear = nn.Linear(in_unit, out_unit)
+        self.norm = nn.LayerNorm(out_unit)
+
+    def forward(self, x):
+        return self.norm(self.linear(x))
+    
 # Model
 class NeRF(nn.Module):
     def __init__(self, D=8, W=256, input_ch=3, input_ch_views=3, output_ch=4, skips=[4], use_viewdirs=False):
@@ -429,6 +800,9 @@ class NeRF(nn.Module):
         self.input_ch_views = input_ch_views
         self.skips = skips
         self.use_viewdirs = use_viewdirs
+        
+        # self.pts_linears = nn.ModuleList(
+        #     [nn.Linear(input_ch, W)] + [Linear_var(W, W) if i not in self.skips else Linear_var(W + input_ch, W) for i in range(D-1)])
         
         self.pts_linears = nn.ModuleList(
             [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
@@ -503,7 +877,7 @@ class NeRF(nn.Module):
         self.alpha_linear.bias.data = torch.from_numpy(np.transpose(weights[idx_alpha_linear+1]))
 
 class DoNeRF(nn.Module):
-    def __init__(self, D, W, skip, n_in, n_out):
+    def __init__(self, D, W, skip, n_in, n_out, n_epi = 0):
         super(DoNeRF, self).__init__()
         self.net_idx = 1
         if "auto" in skip:
@@ -513,6 +887,8 @@ class DoNeRF(nn.Module):
 
             freq = ['10', '4']
             posInputs = (int(freq[0]))*6 + 3
+            if n_epi > 0:
+                posInputs += n_epi
             dirInputs = (int(freq[1]))*6 + 2
             # NOTE: this assumes 8 layers I guess
             skip = f"0::{posInputs}-{D*skip_layer//8}:{posInputs}:"
@@ -551,6 +927,7 @@ class DoNeRF(nn.Module):
                 self.inputLocations[0] = (0,n_in)
         self.n_in = n_in
         self.n_out = n_out
+
         layers = [nn.Linear(self.inputLocations[0][1]-self.inputLocations[0][0], self.W)]
         for i in range(1, self.D):
             layers.append(nn.Linear(self.inputLocations[i][1]-self.inputLocations[i][0] + self.W if i in self.inputLocations else self.W, self.W if i != self.D - 1 else self.n_out))
@@ -1090,8 +1467,7 @@ class MinMaxRay_Net(nn.Module):
             if i in self.skips:
                 h = torch.cat([x, h], -1)
 
-        outputs = self.fc_output(h)
-
+        outputs = self.fc_output(h)        
         return outputs
     
 class MinMaxRaySamplerTRT_Net(nn.Module):
@@ -1120,6 +1496,8 @@ class MinMaxRaySamplerTRT_Net(nn.Module):
                 h = torch.cat([x, h], -1)
 
         outputs = self.fc_output(h)
+
+        # return outputs
 
         mm_rgb = torch.sigmoid(outputs[:, 3*self.N_samples:])
         mm_density_add = outputs[:, self.N_samples:2*self.N_samples]
@@ -1160,6 +1538,220 @@ class MinMaxRayEpiSamplerTRT_Net(nn.Module):
         points_offset = torch.tanh(outputs[:, self.N_samples:4*self.N_samples])
 
         return refine_depth_values, refine_rgb, points_offset
+    
+class MinMaxRayMaskTRT_Net(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, output_ch=3, skips=[4]):
+        """
+        """
+        super(MinMaxRayMaskTRT_Net, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.skips = skips
+
+        self.fc_backbone = nn.ModuleList([nn.Linear(input_ch, W)] +
+                                         [nn.Linear(W, W) if i not in self.skips else
+                                          nn.Linear(W + input_ch, W) for i in range(D - 1)])
+
+        self.fc_output = nn.Linear(W, output_ch)
+
+        # for m in self.modules():
+        #     if isinstance(m, nn.Linear):
+        #         nn.init.kaiming_normal_(m.weight.data)  # initialize weigths with normal distribution
+        #         if m.bias is not None:
+        #             m.bias.data.zero_()  # initialize bias as zero
+
+    def forward(self, x):
+        h = x
+        for i, l in enumerate(self.fc_backbone):
+            h = self.fc_backbone[i](h)
+            h = F.elu(h)
+            if i in self.skips:
+                h = torch.cat([x, h], -1)
+
+        outputs = self.fc_output(h)    
+        mm_mask = torch.sigmoid(outputs)    
+        return mm_mask
+    
+class MinMaxRayAVRSamplerTRT_Net(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, output_ch=3, skips=[4], N_samples = 8):
+        """
+        """
+        super(MinMaxRayAVRSamplerTRT_Net, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.skips = skips
+        self.N_samples = N_samples
+
+        self.fc_backbone = nn.ModuleList([nn.Linear(input_ch, W)] +
+                                         [nn.Linear(W, W) if i not in self.skips else
+                                          nn.Linear(W + input_ch, W) for i in range(D - 1)])
+
+        self.fc_output = nn.Linear(W, output_ch)
+
+        # for m in self.modules():
+        #     if isinstance(m, nn.Linear):
+        #         nn.init.kaiming_normal_(m.weight.data)  # initialize weigths with normal distribution
+        #         if m.bias is not None:
+        #             m.bias.data.zero_()  # initialize bias as zero
+
+    def forward(self, x):
+        h = x
+        for i, l in enumerate(self.fc_backbone):
+            h = self.fc_backbone[i](h)
+            h = F.elu(h)
+            if i in self.skips:
+                h = torch.cat([x, h], -1)
+
+        F_theta0_out = self.fc_output(h)   
+        depth_values = torch.sigmoid(F_theta0_out[:, :self.N_samples])
+        weights_f0 = F_theta0_out[:, self.N_samples:2 * self.N_samples]
+        mm_rgb = F_theta0_out[:, 2 * self.N_samples:2 * self.N_samples + 3]     
+        return mm_rgb, weights_f0, depth_values
+    
+class MinMaxRayAVREpiSamplerTRT_Net(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, output_ch=3, skips=[4], N_samples=8, num_neighbor=4):
+        """
+        """
+        super(MinMaxRayAVREpiSamplerTRT_Net, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.skips = skips
+        self.num_neighbor = num_neighbor
+        self.N_samples = N_samples
+
+        self.fc_backbone = nn.ModuleList([nn.Linear(input_ch, W)] +
+                                         [nn.Linear(W, W) if i not in self.skips else
+                                          nn.Linear(W + input_ch, W) for i in range(D - 1)])
+
+        self.fc_output = nn.Linear(W, output_ch)
+
+        # for m in self.modules():
+        #     if isinstance(m, nn.Linear):
+        #         nn.init.kaiming_normal_(m.weight.data)  # initialize weigths with normal distribution
+        #         if m.bias is not None:
+        #             m.bias.data.zero_()  # initialize bias as zero
+
+    def forward(self, x):
+        h = x
+        for i, l in enumerate(self.fc_backbone):
+            h = self.fc_backbone[i](h)
+            h = F.elu(h)
+            if i in self.skips:
+                h = torch.cat([x, h], -1)
+
+        F_theta1_output = self.fc_output(h)    
+        weights0 = F_theta1_output[:, 0:self.num_neighbor * self.N_samples]
+        combine = torch.sigmoid(F_theta1_output[:, self.num_neighbor * self.N_samples:self.num_neighbor * self.N_samples+self.num_neighbor])
+        
+        return weights0, combine
+    
+class EmbedModel(nn.Module):
+    def __init__(self, D=3, W=64, input_ch=3, output_ch=32):
+        """
+        """
+        super(EmbedModel, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.output_ch = output_ch
+
+        self.fc_backbone = nn.ModuleList([nn.Linear(input_ch, W)] + [nn.Linear(W, W) for i in range(D - 1)])
+
+        self.fc_output = nn.Linear(W, output_ch)
+
+    def forward(self, x):
+        x_shape = x.shape  # Expected N_rays * N_samples, input_ch
+        x = x.view(-1, self.input_ch)
+
+        h = x
+        for i, l in enumerate(self.fc_backbone):
+            h = self.fc_backbone[i](h)
+            h = F.elu(h)
+
+        outputs = self.fc_output(h)
+
+        return outputs
+    
+class NeRF_epiR1(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_epi=3, input_ch_views=3, output_ch=4, skips=[4],
+                 use_viewdirs=False):
+        """
+        """
+        super(NeRF_epiR1, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.input_ch_views = input_ch_views
+        self.input_ch_epi = input_ch_epi
+        self.skips = skips
+        self.use_viewdirs = use_viewdirs
+
+        self.pts_linears = nn.ModuleList(
+            [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in
+                                        range(D - 1)])
+
+        ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
+        self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W // 2)])
+        self.epi_linears = nn.ModuleList([nn.Linear(input_ch_epi + W, W // 2), nn.Linear(W // 2, W // 2),
+                                          nn.Linear(W // 2, W)])
+
+        # if use_viewdirs:
+        #     self.feature_linear = nn.Linear(W, W)
+        #     self.alpha_linear = nn.Linear(W, 1)
+        #     self.rgb_linear = nn.Linear(W // 2, 3)
+        # else:
+        self.feature_combine = nn.Linear(2 * W, W)
+        self.feature_linear = nn.Linear(W, W)
+        self.alpha_linear = nn.Linear(W, 1)
+        self.rgb_linear = nn.Linear(W // 2, output_ch - 1)
+
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight.data)  # initialize weigths with normal distribution
+                if m.bias is not None:
+                    m.bias.data.zero_()  # initialize bias as zero
+
+    def forward(self, x):
+        # if x.shape[-1] == self.input_ch + self.input_ch_epi + self.input_ch_views:
+        #     input_pts, input_epi, input_views = \
+        #         torch.split(x, [self.input_ch, self.input_ch_epi, self.input_ch_views], dim=-1)
+        # else:
+        #     input_pts, input_views = \
+        #         torch.split(x, [self.input_ch, self.input_ch_views], dim=-1)
+        #     input_epi = None
+
+        input_pts, input_epi, input_views = \
+            torch.split(x, [self.input_ch, self.input_ch_epi, self.input_ch_views], dim=-1)
+            
+        h = input_pts
+        for i, l in enumerate(self.pts_linears):
+            h = self.pts_linears[i](h)
+            h = F.relu(h)
+            if i in self.skips:
+                h = torch.cat([input_pts, h], -1)
+        h_0 = h.clone()
+
+        h = torch.cat([h_0, input_epi], -1)
+        for i, l in enumerate(self.epi_linears):
+            h = self.epi_linears[i](h)
+            h = F.relu(h)
+        h = F.relu(self.feature_combine(torch.cat((h_0, h), 1)))
+
+        alpha = self.alpha_linear(h)
+        feature = self.feature_linear(h)
+        h = torch.cat([feature, input_views], -1)
+
+        for i, l in enumerate(self.views_linears):
+            h = self.views_linears[i](h)
+            h = F.relu(h)
+
+        rgb = self.rgb_linear(h)
+        outputs = torch.cat([rgb, alpha], -1)
+
+        return outputs
 
 class MinMaxRay_NetEpiNPE0(nn.Module):
     def __init__(self, D=8, W=256, input_points=4, input_ch=3, input_epi=3, output_ch=3, skips=[4], npe_ch=16):
@@ -2113,13 +2705,34 @@ class Transformer(nn.Module):
 def get_rays(H, W, K, c2w):
     i, j = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1, H))  # pytorch's meshgrid has indexing='ij'
     i = i.t()
-    j = j.t()
+    j = j.t() 
     dirs = torch.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -torch.ones_like(i)], -1)
     # Rotate ray directions from camera frame to the world frame
     rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
     rays_o = c2w[:3,-1].expand(rays_d.shape)
     return rays_o, rays_d
+
+def get_rays_radii(H, W, K, c2w):
+    i, j = torch.meshgrid(torch.linspace(0, W-1, W), torch.linspace(0, H-1, H))  # pytorch's meshgrid has indexing='ij'
+    i = i.t() + 0.5
+    j = j.t() + 0.5
+
+    dirs = torch.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -torch.ones_like(i)], -1)
+    dirs_x = torch.stack([(i+1-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -torch.ones_like(i)], -1)
+    dirs_y = torch.stack([(i-K[0][2])/K[0][0], -(j+1-K[1][2])/K[1][1], -torch.ones_like(i)], -1)
+
+    dirs_stacked = torch.stack([dirs, dirs_x, dirs_y], dim = 0)
+
+    # Rotate ray directions from camera frame to the world frame
+    rays_d_stacked = torch.sum(dirs_stacked[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    directions, dx, dy = rays_d_stacked
+    dx_norm = torch.norm(dx - directions, dim=-1)
+    dy_norm = torch.norm(dy - directions, dim=-1)
+
+    radii = (0.5 * (dx_norm + dy_norm))[..., None] * 2 / np.sqrt(12)
+
+    return radii
 
 def get_centered_rays(H, W, K, c2w):
     dirs = torch.Tensor([0, 0, -1], device = c2w.device)[None]
@@ -2128,7 +2741,6 @@ def get_centered_rays(H, W, K, c2w):
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
     rays_o = c2w[:,:3,-1].expand(rays_d.shape)
     return rays_o, rays_d
-
 
 def get_rays_np(H, W, K, c2w):
     i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
@@ -2139,6 +2751,27 @@ def get_rays_np(H, W, K, c2w):
     rays_o = np.broadcast_to(c2w[:3,-1], np.shape(rays_d))
     return rays_o, rays_d
 
+def get_rays_radii_np(H, W, K, c2w):
+    i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
+
+    i = i + 0.5
+    j = j + 0.5
+
+    dirs = np.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -np.ones_like(i)], -1)
+    dirs_x = np.stack([(i + 1 -K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -np.ones_like(i)], -1)
+    dirs_y = np.stack([(i-K[0][2])/K[0][0], -(j + 1 -K[1][2])/K[1][1], -np.ones_like(i)], -1)
+
+    dirs_stacked = np.stack([dirs, dirs_x, dirs_y], axis = 0)
+
+    # Rotate ray directions from camera frame to the world frame
+    rays_d_stacked = np.sum(dirs_stacked[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    directions, dx, dy = rays_d_stacked
+    dx_norm = np.linalg.norm(dx - directions, axis=-1)
+    dy_norm = np.linalg.norm(dy - directions, axis=-1)
+
+    radii = (0.5 * (dx_norm + dy_norm))[..., None] * 2 / np.sqrt(12)
+
+    return radii
 
 def ndc_rays(H, W, focal, near, rays_o, rays_d):
     # Shift ray origins to near plane

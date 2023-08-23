@@ -1,5 +1,5 @@
 expname = leaves_refine_12samples_undist
-ft_path = logs_epi_RR/leaves_refine_12samples_undist/430000.tar
+ft_path = logs_epi_RR/leaves_refine_12samples_undist/500000.tar
 datadir = data/nerf_llff_data_undist/leaves_undistort
 dataset_type = llff
 
