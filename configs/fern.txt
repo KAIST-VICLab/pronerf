@@ -1,0 +1,29 @@
+expname = fern_Ns8_kr8_rpkr4_Nrp32_epiSepiR
+datadir = ./data/nerf_llff_data/fern
+dataset_type = llff
+no_ndc = False
+i_video = 20000
+
+factor = 4
+llffhold = 8
+N_samples = 8
+k_ref = 8
+rp_k_ref = 4
+
+N_rand = 1024
+N_importance = 0
+
+use_viewdirs = True
+raw_noise_std = 0e0
+
+lrate = 5e-4
+a_mmrgb = 1.0
+a_acc = 0.0
+a_mmdisp = 0.0
+mmnetdepth = 8
+mmnetwidth = 256
+mmnetskips = [10000]
+N_point_ray_enc = 32
+mm_emb = False
+weight_decay = 1e-7
+rand_crop_size = 200
