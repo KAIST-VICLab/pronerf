@@ -1,0 +1,31 @@
+expname = fern_4_epiner_sample_x4randrays
+datadir = ./data/nerf_llff_data/fern
+dataset_type = llff
+no_ndc = False
+netchunk = 200000
+i_video = 2000001
+
+factor = 4
+llffhold = 8
+k_ref = 16
+
+N_rand = 4096
+N_samples = 4
+N_importance = 0
+
+use_viewdirs = True
+raw_noise_std = 1e0
+
+lrate = 5e-4
+a_p = 0.00
+a_mmrgb = 1.0
+a_acc = 0.0
+mmnetdepth = 8
+mmnetwidth = 128
+mmnetskips = [10000]
+N_point_ray_enc = 32
+mm_emb = False
+precrop_iters = 0
+precrop_frac = 0.5
+weight_decay = 1e-7
+rand_crop_size = 200
