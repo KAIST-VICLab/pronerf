@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '7'
+gpu_n = '3'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -27,6 +27,7 @@ from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
+from load_kaist import load_kaist_data
 
 t1, t2 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
@@ -452,11 +453,11 @@ def create_nerf(args):
                           input_ch_epi=3*args.num_neighbor, output_ch=output_ch,
                           skips=skips, input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
     else:
-        # model = NeRF(D=args.netdepth, W=args.netwidth,
-        #              input_ch=input_ch, output_ch=output_ch, skips=skips,
-        #              input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
-        model = DoNeRF(D=args.netdepth, W=args.netwidth,
-                     n_in=input_ch + input_ch_views, n_out=output_ch, skip='auto')
+        model = NeRF(D=args.netdepth, W=args.netwidth,
+                     input_ch=input_ch, output_ch=output_ch, skips=skips,
+                     input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
+        # model = DoNeRF(D=args.netdepth, W=args.netwidth,
+        #              n_in=input_ch + input_ch_views, n_out=output_ch, skip='auto')
     model.to(device)
     # model.load_state_dict(pretrain_ckpt['network_fn_state_dict'])
     grad_vars.append({'params': model.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
@@ -474,7 +475,7 @@ def create_nerf(args):
     model_mmray = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
                                 input_ch=2 + input_ch * args.N_point_ray_enc if args.mm_emb else
                                 6 * args.N_point_ray_enc,
-                                output_ch=3 * args.N_samples + 3 + 2*args.N_samples, skips=args.mmnetskips)
+                                output_ch=3 * args.N_samples + 3, skips=args.mmnetskips)
     s_grad_vars.append({'params': model_mmray.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     model_refine = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
@@ -584,7 +585,7 @@ def compute_query_points_from_rays(
 
 
 def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False, mm_density_add=None,
-                mm_density_mul=None, iter=1e6, color_shift = None, color_scale = None):
+                mm_density_mul=None, iter=1e6):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -604,6 +605,8 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
 
+
+    raw = torch.clamp(raw, -1e1, 1e1)
     rgb = torch.sigmoid(raw[..., :3])  # [N_rays, N_samples, 3]
     noise = 0.
     if raw_noise_std > 0.:
@@ -621,7 +624,6 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         alpha = alpha * torch.relu(mm_density_mul)
             # alpha = alpha*torch.sigmoid(mm_density_mul)
         
-        rgb = rgb*color_scale + color_shift
     else:
         alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
@@ -688,12 +690,12 @@ def render_rays(ray_batch, or_ray_batch,
     else:
         with torch.no_grad():
             min_max_rays = min_max_ray_net(plucker_pts)
-    mm_rgb = torch.sigmoid(min_max_rays[:, 3 * N_samples:3 * N_samples+3])
-    mm_density_add = min_max_rays[:, N_samples:2 * N_samples]
-    mm_density_mul = min_max_rays[:, 2 * N_samples:3 * N_samples]
+    mm_rgb = torch.sigmoid(min_max_rays[:, 3*N_samples:])
+    mm_density_add = min_max_rays[:, N_samples:2*N_samples]
+    mm_density_mul = min_max_rays[:, 2*N_samples:3*N_samples]
 
-    color_shift = min_max_rays[:,3 * N_samples+3:4 * N_samples+3].view(N_rays, N_samples)
-    color_scale = min_max_rays[:,4 * N_samples+3:].view(N_rays, N_samples)
+    # color_shift = min_max_rays[:,3 * N_samples+3:4 * N_samples+3].view(N_rays, N_samples)
+    # color_scale = min_max_rays[:,4 * N_samples+3:].view(N_rays, N_samples)
 
     depth_values = torch.sigmoid(min_max_rays[:, :N_samples]) * (far - near) + near  # B, Nsamples, H, W
     sort_out = torch.sort(depth_values, dim=-1)
@@ -701,8 +703,8 @@ def render_rays(ray_batch, or_ray_batch,
     mm_density_add = torch.gather(mm_density_add, dim=1, index=sort_out[1])
     mm_density_mul = torch.gather(mm_density_mul, dim=1, index=sort_out[1])
 
-    color_shift = torch.gather(color_shift, dim=1, index=sort_out[1])[...,None]
-    color_scale = torch.gather(color_scale, dim=1, index=sort_out[1])[...,None]
+    # color_shift = torch.gather(color_shift, dim=1, index=sort_out[1])[...,None]
+    # color_scale = torch.gather(color_scale, dim=1, index=sort_out[1])[...,None]
 
     depth_values_3d = 1 / (1 - depth_values - 1e-6)  # ! convert ndc zval to 3d zval
 
@@ -854,7 +856,7 @@ def render_rays(ray_batch, or_ray_batch,
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, refine_depth_values, rays_d, raw_noise_std,
                                                                      white_bkgd, pytest=pytest,
                                                                      mm_density_add=mm_density_add,
-                                                                     mm_density_mul=mm_density_mul, iter=iter, color_shift=color_shift, color_scale=color_scale)
+                                                                     mm_density_mul=mm_density_mul, iter=iter)
     else:
         rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, refine_depth_values, rays_d, raw_noise_std,
                                                                      white_bkgd, pytest=pytest, iter=iter)
@@ -874,6 +876,35 @@ def train():
     K = None
     if args.dataset_type == 'llff':
         images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+                                                                  recenter=True, bd_factor=.75,
+                                                                  spherify=args.spherify)
+        hwf = poses[0, :3, -1]
+        poses = poses[:, :3, :4]
+        
+        print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
+        if not isinstance(i_test, list):
+            i_test = [i_test]
+
+        if args.llffhold > 0:
+            print('Auto LLFF holdout,', args.llffhold)
+            i_test = np.arange(images.shape[0])[::args.llffhold]
+
+        i_val = i_test
+        i_train = np.array([i for i in np.arange(int(images.shape[0])) if
+                            (i not in i_test and i not in i_val)])
+
+        print('DEFINING BOUNDS')
+        if args.no_ndc:
+            near = np.ndarray.min(bds) * .9
+            far = np.ndarray.max(bds) * 1.
+
+        else:
+            near = 1e-6
+            far = 1.
+        print('NEAR FAR', near, far)
+
+    elif args.dataset_type == 'kaist':
+        images, poses, bds, render_poses, i_test = load_kaist_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
         hwf = poses[0, :3, -1]

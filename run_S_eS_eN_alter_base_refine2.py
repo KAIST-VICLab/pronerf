@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '6'
+gpu_n = '2'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -28,7 +28,7 @@ from load_llff import load_llff_data, load_llff_cimgs, load_llff_data_infer
 from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
-
+from load_kaist import load_kaist_data
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
@@ -440,11 +440,11 @@ def create_nerf(args):
     model.to(device)
 
     model_fine = None
-    # model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
-    #                     input_ch=input_ch, output_ch=output_ch, skips=skips,
-    #                     input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
-    model_fine = DoNeRF(D=args.netdepth, W=args.netwidth,
-                    n_in=input_ch + input_ch_views, n_out=output_ch, skip='auto')
+    model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
+                        input_ch=input_ch, output_ch=output_ch, skips=skips,
+                        input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
+    # model_fine = DoNeRF(D=args.netdepth, W=args.netwidth,
+    #                 n_in=input_ch + input_ch_views, n_out=output_ch, skip='auto')
 
     model_fine.to(device)
     if args.pretrain_path:
@@ -808,12 +808,13 @@ def train():
     # Load data
     K = None
     if args.dataset_type == 'llff':
-        images, poses, bds, render_poses, i_test, i_ref = load_llff_data_infer(args.datadir, args.factor,
-                                                                  recenter=True, bd_factor=.75,
-                                                                  spherify=args.spherify, num_neighbor=4)
-        # images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+        # images, poses, bds, render_poses, i_test, i_ref = load_llff_data_infer(args.datadir, args.factor,
         #                                                           recenter=True, bd_factor=.75,
-        #                                                           spherify=args.spherify)
+        #                                                           spherify=args.spherify, num_neighbor=4)
+        
+        images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+                                                                  recenter=True, bd_factor=.75,
+                                                                  spherify=args.spherify)
         low_imgs = load_llff_cimgs(args.datadir, args.factor)
 
         hwf = poses[0,:3,-1]
@@ -839,6 +840,35 @@ def train():
             
         else:
             near = 0.
+            far = 1.
+        print('NEAR FAR', near, far)
+
+    elif args.dataset_type == 'kaist':
+        images, poses, bds, render_poses, i_test = load_kaist_data(args.datadir, args.factor,
+                                                                  recenter=True, bd_factor=.75,
+                                                                  spherify=args.spherify)
+        hwf = poses[0, :3, -1]
+        poses = poses[:, :3, :4]
+        
+        print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
+        if not isinstance(i_test, list):
+            i_test = [i_test]
+
+        if args.llffhold > 0:
+            print('Auto LLFF holdout,', args.llffhold)
+            i_test = np.arange(images.shape[0])[::args.llffhold]
+
+        i_val = i_test
+        i_train = np.array([i for i in np.arange(int(images.shape[0])) if
+                            (i not in i_test and i not in i_val)])
+
+        print('DEFINING BOUNDS')
+        if args.no_ndc:
+            near = np.ndarray.min(bds) * .9
+            far = np.ndarray.max(bds) * 1.
+
+        else:
+            near = 1e-6
             far = 1.
         print('NEAR FAR', near, far)
 
@@ -982,10 +1012,12 @@ def train():
     render_kwargs_test['i_train'] = i_train
 
     render_kwargs_train['images'] = images[i_train]
-    render_kwargs_test['images'] = low_imgs[i_ref]
+    render_kwargs_test['images'] = images[i_train]
+    # render_kwargs_test['images'] = low_imgs[i_ref]
 
     render_kwargs_train['poses'] = poses[i_train]
-    render_kwargs_test['poses'] = poses[i_ref]
+    render_kwargs_test['poses'] = poses[i_train]
+    # render_kwargs_test['poses'] = poses[i_ref]
 
     render_kwargs_train['ref_K'] = K_ten
     render_kwargs_test['ref_K'] = K_ten
