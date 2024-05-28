@@ -6,7 +6,7 @@ import json
 import torch.nn.functional as F
 import cv2
 
-from sklearn.cluster import KMeans
+# from sklearn.cluster import KMeans
 
 
 trans_t = lambda t : torch.Tensor([

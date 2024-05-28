@@ -283,4 +283,4 @@ def gen_poses(basedir, match_type, factors=None):
     return True
 
 if __name__ == "__main__":
-    gen_poses("data/kaist_dataset/shelf", None,factors=[4,8])
+    gen_poses("data/kaist/shelf", None,factors=[4,8])

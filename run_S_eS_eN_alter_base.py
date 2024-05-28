@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '3'
+gpu_n = '1'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -167,6 +167,8 @@ def config_parser():
                         help='set for spherical 360 scenes')
     parser.add_argument("--llffhold", type=int, default=8,
                         help='will take every 1/N images as LLFF test set, paper uses 8')
+    parser.add_argument("--test_frames", type=int, default=[3,11], nargs='*',
+                        help='')
 
     # logging/saving options
     parser.add_argument("--i_print", type=int, default=5000,
@@ -394,13 +396,13 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             filename = os.path.join(savedir, 'rgb0_{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
-            rgb8 = to8b(mm_rgbs[-1])
-            filename = os.path.join(savedir, 'rgb00_{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
-
-            # rgb8 = to8b(depths[-1]/np.max(depths[-1]))
-            # filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
+            # rgb8 = to8b(mm_rgbs[-1])
+            # filename = os.path.join(savedir, 'rgb00_{:03d}.png'.format(i))
             # imageio.imwrite(filename, rgb8)
+
+            rgb8 = to8b(depths[-1]/np.max(depths[-1]))
+            filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
+            imageio.imwrite(filename, rgb8)
 
             # rgb8 = to8b(depths0[-1]/np.max(depths0[-1]))
             # filename = os.path.join(savedir, 'depth0_{:03d}.png'.format(i))
@@ -410,8 +412,8 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             filename = os.path.join(savedir, 'gt_{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
-            filename = os.path.join(savedir, 'err{:03d}.png'.format(i))
-            imageio.imwrite(filename, error)
+            # filename = os.path.join(savedir, 'err{:03d}.png'.format(i))
+            # imageio.imwrite(filename, error)
 
     rgbs0 = np.stack(rgbs0, 0)
     rgbs1 = np.stack(rgbs1, 0)
@@ -538,7 +540,7 @@ def create_nerf(args):
     }
 
     # NDC only good for LLFF-style forward facing data
-    if args.dataset_type != 'llff' or args.no_ndc:
+    if args.no_ndc:
         print('Not ndc!')
         render_kwargs_train['ndc'] = False
         render_kwargs_train['lindisp'] = args.lindisp
@@ -865,6 +867,10 @@ def render_rays(ray_batch, or_ray_batch,
     if train_sampler:
         ret.update({'sigma1': raw[..., 3]}) #, 'sigma0': aux_raw[..., 3], 'aux_rgb': aux_rgb_map})
 
+    for k,v in ret.items():
+        if torch.isnan(v).any() or torch.isinf(v).any():
+            breakpoint()
+
     return ret
 
 
@@ -878,6 +884,7 @@ def train():
         images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
+
         hwf = poses[0, :3, -1]
         poses = poses[:, :3, :4]
         
@@ -907,6 +914,9 @@ def train():
         images, poses, bds, render_poses, i_test = load_kaist_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
+        if poses.shape[0] > 80:
+            poses = poses[:80]
+            images = images[:80]
         hwf = poses[0, :3, -1]
         poses = poses[:, :3, :4]
         
@@ -914,9 +924,10 @@ def train():
         if not isinstance(i_test, list):
             i_test = [i_test]
 
-        if args.llffhold > 0:
-            print('Auto LLFF holdout,', args.llffhold)
-            i_test = np.arange(images.shape[0])[::args.llffhold]
+        # if args.llffhold > 0:
+        #     print('Auto LLFF holdout,', args.llffhold)
+        #     i_test = np.arange(images.shape[0])[::args.llffhold]
+        i_test =  args.test_frames
 
         i_val = i_test
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if
@@ -1172,7 +1183,7 @@ def train():
             param_group['lr'] = new_lrate
         ################################
 
-        dt = time.time() - time0
+        # dt = time.time() - time0
         # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
         #####           end            #####
 

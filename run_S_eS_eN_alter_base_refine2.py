@@ -1,7 +1,7 @@
 import os
 import sys
 
-gpu_n = '2'
+gpu_n = '0'
 os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
 print(f'Training on GPU {gpu_n}')
 import cv2
@@ -163,6 +163,8 @@ def config_parser():
                         help='set for spherical 360 scenes')
     parser.add_argument("--llffhold", type=int, default=8,
                         help='will take every 1/N images as LLFF test set, paper uses 8')
+    parser.add_argument("--test_frames", type=int, default=[3,11], nargs='*',
+                        help='')
 
     # logging/saving options
     parser.add_argument("--i_print", type=int, default=5000,
@@ -346,29 +348,29 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         if gt_imgs is not None and render_factor == 0:
             p = mse2psnr(img2mse(rgb1, gt_imgs[i]))
             psnrs.append(p)
-            error = (rgb1 - gt_imgs[i])**2
-            error = error.cpu().numpy()
-            error = (error - np.min(error)) / (max(np.max(error) - np.min(error), 1e-8))
-            error = cv2.applyColorMap((error * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
+            # error = (rgb1 - gt_imgs[i])**2
+            # error = error.cpu().numpy()
+            # error = (error - np.min(error)) / (max(np.max(error) - np.min(error), 1e-8))
+            # error = cv2.applyColorMap((error * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
 
-            # ssims
-            ssim = img2ssim(rgb1.cpu(), (gt_imgs[i]).cpu())
-            r2l_ssim = r2l_ssim_func(
-                rgb1.cpu()[None].permute(0, 3, 1, 2), (gt_imgs[i]).cpu()[None].permute(0, 3, 1, 2))
-            nex_ssim = structural_similarity(rgb1.cpu().numpy(), (gt_imgs[i]).cpu(
-            ).numpy(), win_size=11, multichannel=True, gaussian_weights=True)
-            ssims.append(ssim)
-            nex_ssims.append(nex_ssim)
-            r2l_ssims.append(r2l_ssim)
+            # # ssims
+            # ssim = img2ssim(rgb1.cpu(), (gt_imgs[i]).cpu())
+            # r2l_ssim = r2l_ssim_func(
+            #     rgb1.cpu()[None].permute(0, 3, 1, 2), (gt_imgs[i]).cpu()[None].permute(0, 3, 1, 2))
+            # nex_ssim = structural_similarity(rgb1.cpu().numpy(), (gt_imgs[i]).cpu(
+            # ).numpy(), win_size=11, multichannel=True, gaussian_weights=True)
+            # ssims.append(ssim)
+            # nex_ssims.append(nex_ssim)
+            # r2l_ssims.append(r2l_ssim)
 
-            # lpips
-            lpips_val = rgb_lpips(
-                (gt_imgs[i]).cpu().numpy(), rgb1.cpu().numpy(), 'vgg', device)
-            lpips_res.append(lpips_val)
+            # # lpips
+            # lpips_val = rgb_lpips(
+            #     (gt_imgs[i]).cpu().numpy(), rgb1.cpu().numpy(), 'vgg', device)
+            # lpips_res.append(lpips_val)
 
-            lpips_val = rgb_lpips(
-                (gt_imgs[i]).cpu().numpy(), rgb1.cpu().numpy(), 'alex', device)
-            lpips_res_alex.append(lpips_val)
+            # lpips_val = rgb_lpips(
+            #     (gt_imgs[i]).cpu().numpy(), rgb1.cpu().numpy(), 'alex', device)
+            # lpips_res_alex.append(lpips_val)
 
 
         if savedir is not None:
@@ -409,11 +411,11 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         print(psnrs)
         print(f'Mean Test PSNR {round(mean_psnr.detach().item(), 2)}')
         
-    print('LPIPS vgg', round(np.array(lpips_res).mean(),3))
-    print('LPIPS alex', round(np.array(lpips_res_alex).mean(),3))
-    print('SSIMS', round(np.array(ssims).mean(),3))
-    print('NEX SSIMS', round(np.array(nex_ssims).mean(),3))
-    print('R2l SSIMS', round(np.array(r2l_ssims).mean(),3))
+    # print('LPIPS vgg', round(np.array(lpips_res).mean(),3))
+    # print('LPIPS alex', round(np.array(lpips_res_alex).mean(),3))
+    # print('SSIMS', round(np.array(ssims).mean(),3))
+    # print('NEX SSIMS', round(np.array(nex_ssims).mean(),3))
+    # print('R2l SSIMS', round(np.array(r2l_ssims).mean(),3))
     return rgbs0, rgbs1, depths, depths
 
 
@@ -531,7 +533,7 @@ def create_nerf(args):
     }
 
     # NDC only good for LLFF-style forward facing data
-    if args.dataset_type != 'llff' or args.no_ndc:
+    if args.no_ndc:
         print('Not ndc!')
         render_kwargs_train['ndc'] = False
         render_kwargs_train['lindisp'] = args.lindisp
@@ -847,6 +849,9 @@ def train():
         images, poses, bds, render_poses, i_test = load_kaist_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
+        if poses.shape[0] > 80:
+            poses = poses[:80]
+            images = images[:80]
         hwf = poses[0, :3, -1]
         poses = poses[:, :3, :4]
         
@@ -854,9 +859,7 @@ def train():
         if not isinstance(i_test, list):
             i_test = [i_test]
 
-        if args.llffhold > 0:
-            print('Auto LLFF holdout,', args.llffhold)
-            i_test = np.arange(images.shape[0])[::args.llffhold]
+        i_test =  args.test_frames
 
         i_val = i_test
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if
@@ -993,7 +996,7 @@ def train():
     # Move training data to GPU
     if use_batching:
         images = torch.Tensor(images).to(device)
-        low_imgs = torch.Tensor(low_imgs).to(device)
+        # low_imgs = torch.Tensor(low_imgs).to(device)/
     poses = torch.Tensor(poses).to(device)
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)

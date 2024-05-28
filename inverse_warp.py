@@ -537,7 +537,7 @@ def inverse_warp_rod1_rt2_coords(img, depth, ro1, rd1, c2w2, intrinsics, intrins
 
     # 4. Get pixel coordinates in c2: p2 = Kc2 / c2[z]
     z = torch.abs(c2[:, 2, None, :])
-    c2_ = c2 / z
+    c2_ = c2 / (z + 1e-8)
     c2_[:, 2, :] = 1
     c2_[:, 1, :] *= -1
     p2 = torch.bmm(intrinsics, c2_)
