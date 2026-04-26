@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <a href="full_pipeline.pdf">Pipeline Figure</a>
+  <img src="assets/full_pipeline.png" alt="ProNeRF pipeline overview" width="95%">
 </p>
 
 This repository contains a cleaned release path for efficient NeRF rendering on
