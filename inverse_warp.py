@@ -4,9 +4,13 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 import os
 
-torch.set_default_tensor_type('torch.cuda.FloatTensor')
+if torch.cuda.is_available():
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
 pixel_coords = None
-time1, time2 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+if torch.cuda.is_available():
+    time1, time2 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+else:
+    time1, time2 = None, None
 
 def bwd_warp(H, W, K, world_points, src_imgs, src_poses, patch_H, patch_W):
     homo_world_points = torch.cat(

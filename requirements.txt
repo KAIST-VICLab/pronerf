@@ -7,3 +7,6 @@ configargparse
 tensorboard>=2.0
 tqdm
 opencv-python
+lpips
+scikit-image
+onnx

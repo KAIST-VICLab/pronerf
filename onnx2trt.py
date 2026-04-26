@@ -2,9 +2,7 @@ import tensorrt as trt
 import sys
 import os
 
-gpu_n = '5'
-os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
-print(f'Training on GPU {gpu_n}')
+print(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
 
 def get_engine(onnx_file_path="", engine_file_path="", fp16_mode=True, int8_mode=False, save_engine=True,max_batch_size=1, in_ch = 90, is_nerf = True):
     """Attempts to load a serialized engine if available, otherwise builds a new TensorRT engine and saves it."""

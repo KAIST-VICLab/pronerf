@@ -111,9 +111,11 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True):
     
     def imread(f):
         if f.endswith('png'):
-            return imageio.imread(f, ignoregamma=True)
-        else:
-            return imageio.imread(f)
+            try:
+                return imageio.imread(f, ignoregamma=True)
+            except TypeError:
+                return imageio.imread(f)
+        return imageio.imread(f)
         
     imgs = [imread(f)[...,:3]/255. for f in imgfiles]
     imgs = np.stack(imgs, -1)  
@@ -131,9 +133,11 @@ def load_llff_cimgs(basedir, factor):
     
     def imread(f):
         if f.endswith('png'):
-            return imageio.imread(f, ignoregamma=True)
-        else:
-            return imageio.imread(f)
+            try:
+                return imageio.imread(f, ignoregamma=True)
+            except TypeError:
+                return imageio.imread(f)
+        return imageio.imread(f)
         
     imgs = [imread(f)[...,:3]/255. for f in imgfiles]
     imgs = np.stack(imgs, -1)  
@@ -541,6 +545,5 @@ def load_llff_data_infer(basedir, factor=8, recenter=True, bd_factor=.75, spheri
     # i_ref = i_train
 
     return images, poses, bds, render_poses, i_test, i_ref
-
 
 

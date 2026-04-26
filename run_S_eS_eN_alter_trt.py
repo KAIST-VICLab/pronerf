@@ -1,10 +1,7 @@
 import os
 import sys
 
-gpu_n = '6'
-os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
-print(f'Training on GPU {gpu_n}')
-import cv2
+print(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
 
 import numpy as np
 import imageio
@@ -15,19 +12,27 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm, trange
-from ptflops import flops_counter
+try:
+    from ptflops import flops_counter
+except ImportError:
+    flops_counter = None
 import inverse_warp
-import line_profiler
+try:
+    import line_profiler  # noqa: F401
+except ImportError:
+    line_profiler = None
 
 import matplotlib.pyplot as plt
 
 from run_nerf_helpers import *
-from trt_infer_v2 import *
+try:
+    from trt_infer_v2 import *
+    TRT_IMPORT_ERROR = None
+except ImportError as exc:
+    TRT_IMPORT_ERROR = exc
+    NeRFEngine = MMEngine = RefineEngine = None
 
 from load_llff import load_llff_data, load_llff_data_infer
-from load_deepvoxels import load_dv_data
-from load_blender import load_blender_data
-from load_LINEMOD import load_LINEMOD_data
 
 PROFILING = False
 if PROFILING:
@@ -50,6 +55,8 @@ def config_parser():
                         help='input data directory')
     parser.add_argument("--use_trt", action='store_true',
                         help='use trt inference')
+    parser.add_argument("--export_only", action='store_true',
+                        help='export ONNX models and exit before rendering')
 
     # training options
     parser.add_argument("--netdepth", type=int, default=8,
@@ -93,11 +100,7 @@ def config_parser():
     parser.add_argument("--no_reload", action='store_true',
                         help='do not reload weights from saved ckpt')
     parser.add_argument("--ft_path", type=str, default=None,
-                        help='specific weights npy file to reload for coarse network')
-    parser.add_argument("--pretrain_path", type=str, default=None,
-                        help='specific weights npy file to reload pretrain network')
-    parser.add_argument("--pretrain_depth_path", type=str, default=None,
-                        help='specific weights npy file to reload pretrain depth')
+                        help='stage 2 checkpoint used for PyTorch/ONNX/TensorRT inference')
     parser.add_argument("--nerf_engine_path", type=str, default=None,
                         help='nerf trt model')
     parser.add_argument("--mm_engine_path", type=str, default=None,
@@ -148,19 +151,9 @@ def config_parser():
 
     # dataset options
     parser.add_argument("--dataset_type", type=str, default='llff',
-                        help='options: llff / blender / deepvoxels')
-    parser.add_argument("--testskip", type=int, default=8,
-                        help='will load 1/N images from test/val sets, useful for large datasets like deepvoxels')
-
-    # deepvoxels flags
-    parser.add_argument("--shape", type=str, default='greek',
-                        help='options : armchair / cube / greek / vase')
-
-    # blender flags
+                        help='dataset loader; this release supports llff')
     parser.add_argument("--white_bkgd", action='store_true',
-                        help='set to render synthetic data on a white bkgd (always use for dvoxels)')
-    parser.add_argument("--half_res", action='store_true',
-                        help='load blender synthetic data at 400x400 instead of 800x800')
+                        help='render with a white background')
 
     # llff flags
     parser.add_argument("--factor", type=int, default=8,
@@ -185,6 +178,8 @@ def config_parser():
                         help='frequency of testset saving')
     parser.add_argument("--i_video", type=int, default=10000,
                         help='frequency of render_poses video saving')
+    parser.add_argument("--max_images", type=int, default=None,
+                        help='optional number of test images to render; useful for smoke tests')
 
     return parser
 
@@ -207,9 +202,7 @@ def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
-        # embedded = torch.cat([embedded, embedded_dirs], -1)
 
-    # outputs_flat = batchify(fn, netchunk)(embedded)
     outputs_flat = fn(embedded, embedded_dirs)
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
@@ -243,17 +236,12 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     psnrs = []
     image_macs_pp = []
 
-    # ssims = []
-    # lpips_res = []
-    # lpips_vgg = lpips.LPIPS(net="vgg").cuda()
-    # lpips_vgg = lpips_vgg.eval()
-
     t1, t2 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
     for i, c2w in enumerate(tqdm(render_poses)):
         render_kwargs['target_pose'] = c2w
 
-        # Step 1: prepare render input
+        # Prepare the target rays and their original camera-space form.
         rays_o, rays_d = get_rays(H, W, K, c2w)
         viewdirs = rays_d
         viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
@@ -282,14 +270,14 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         rays = torch.cat([rays_o, rays_d, near, far], -1)
         rays = torch.cat([rays, viewdirs], -1)
 
-        # mm input
+        # The sampler predicts sparse depths from Plucker ray features.
         pts, _ = compute_query_points_from_rays(
-            rays_o, rays_d, 0., 1., render_kwargs['N_point_ray_enc'], randomize=False)  # ! this is ndc space
+            rays_o, rays_d, 0., 1., render_kwargs['N_point_ray_enc'], randomize=False)
         plucker_pts = render_kwargs['embed_rays'](pts, rays_d[:,None,:].expand(-1,render_kwargs['N_point_ray_enc'],-1)) # nump_pts + origin
         plucker_pts = plucker_pts.view(-1, (render_kwargs['N_point_ray_enc'])*6)
         render_kwargs['mm_input'] = plucker_pts
 
-        # nearest cam id
+        # Select nearby source views for epipolar color features.
         rel_cam_dist = torch.sum((c2w[None,:, 3] - render_kwargs['poses'][:, :, 3]) ** 2, 1) ** (1 / 2)
         _, rel_cam_idx = torch.sort(rel_cam_dist.detach(), dim=0)
         ref_nos = rel_cam_idx[:render_kwargs['num_neighbor']]
@@ -314,7 +302,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         render_kwargs['ref_rgb'] = ref_rgb
 
 
-        # Step 2 IMPORTANT: Bind input to gpu array
+        # TensorRT engines keep persistent device buffers, so bind static inputs once.
         if render_kwargs['use_trt']:
             input_dirs = viewdirs[:, None].repeat(1,render_kwargs['N_samples'],1)
             input_dirs_flat = input_dirs.view(-1,3)
@@ -330,16 +318,12 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             render_kwargs['refine_engine'].bind_input(refine_input_holder, warmup=True)
             _ = render_kwargs['refine_engine'].run()
 
-        # # Step 3: Warm up run
-        # rgb0, rgb1, depth_map, extras = render(rays, or_rays, sh, **render_kwargs)
-
-        # count flops
         if render_kwargs['count_flops']:
             for k in ['network_fine', 'min_max_ray_net', 'refine_net']:
                 render_kwargs[k].start_flops_count(ost=None, verbose=False, ignore_list=[])
 
 
-        # Step 4: Measure inference time
+        # Measure the full sparse-depth, refinement, and NeRF rendering path.
         for _ in range(20):
             t1.record()
             rgb0, rgb1, depth_map, _ = render(rays, or_rays, sh, **render_kwargs)
@@ -359,7 +343,7 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             image_macs_pp.append(total_macs)
         print('Total flops:', total_macs*2)
 
-        # Step 5: For logging purposes
+        # Save the final image and depth outputs for release evaluation.
         rgbs0.append(rgb0.cpu().numpy())
         rgbs1.append(rgb1.cpu().numpy())
         depths.append(depth_map.cpu().numpy())
@@ -367,16 +351,6 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         if gt_imgs is not None and render_factor == 0:
             p = mse2psnr(img2mse(rgb1, torch.Tensor(gt_imgs[i]).to(device)))
             psnrs.append(p)
-
-            # # ssims
-            # ssim = img2ssim(rgb1.permute(2, 0, 1)[None], (gt_imgs[i]).permute(2, 0, 1)[None].cuda())
-            # ssims.append(ssim.cpu().numpy())
-
-            # # lpips
-            # scaled_gt = (gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
-            # scaled_pred = rgb1.permute(2, 0, 1)[None] * 2.0 - 1.0
-            # lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
-            # lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
 
         if savedir is not None:
             rgb8 = to8b(rgbs1[-1])
@@ -398,23 +372,22 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
         print(psnrs)
         print(f'Mean Test PSNR {mean_psnr.detach().item()}')
 
-    # print('LPIPS', np.array(lpips_res).mean())
-    # print('SSIMS', np.array(ssims).mean())
     return rgbs0, rgbs1, depths, depths
 
 def model2onnx(model, in_ch, savedir, model_name, batch_size):
     """This function converts torch nn module to onnx format"""
     model.eval()
+    model_device = next(model.parameters()).device
     fn = os.path.join(savedir, '{}.onnx'.format(model_name))
     if model_name == 'nerf':
-        dummy_input = torch.randn(in_ch[0])[None].repeat(batch_size,1)
-        dummy_input_dir = torch.randn(in_ch[1])[None].repeat(batch_size,1)
+        dummy_input = torch.randn(in_ch[0], device=model_device)[None].repeat(batch_size,1)
+        dummy_input_dir = torch.randn(in_ch[1], device=model_device)[None].repeat(batch_size,1)
         torch.onnx.export(model, (dummy_input, dummy_input_dir), fn, verbose=True,
                                 export_params=True, input_names = ['input', 'input_dir'],
                                     output_names = ['output'],
                                     dynamic_axes={'input' : {0 : 'batch_size'}, 'input_dir' : {0 : 'batch_size'},'output' : {0 : 'batch_size'}})
     elif model_name == 'minmaxrays_net':
-        dummy_input = torch.randn(in_ch)[None].repeat(batch_size,1)
+        dummy_input = torch.randn(in_ch, device=model_device)[None].repeat(batch_size,1)
         torch.onnx.export(model, (dummy_input, ), fn, verbose=True,
                                 export_params=True, input_names = ['input'],
                                     output_names = ['mm_rgb', 'mm_density_add', 'mm_density_mul', 'depth_values'],
@@ -424,7 +397,7 @@ def model2onnx(model, in_ch, savedir, model_name, batch_size):
                                                     'mm_density_mul' : {0 : 'batch_size'},
                                                     'depth_values' : {0 : 'batch_size'}})
     elif model_name == 'refine_net':
-        dummy_input = torch.randn(in_ch)[None].repeat(batch_size,1)
+        dummy_input = torch.randn(in_ch, device=model_device)[None].repeat(batch_size,1)
         torch.onnx.export(model, (dummy_input, ), fn, verbose=True,
                                 export_params=True, input_names = ['input'],
                                     output_names = ['refine_depth_values', 'refine_rgb', 'points_offset'],
@@ -491,8 +464,6 @@ def create_nerf(args):
     basedir = args.basedir
     expname = args.expname
 
-    ##########################
-
     # Load checkpoints
     if args.ft_path is not None and args.ft_path!='None':
         ckpts = [args.ft_path]
@@ -502,32 +473,30 @@ def create_nerf(args):
     if len(ckpts) > 0 and not args.no_reload:
         ckpt_path = ckpts[-1]
         print('Reloading from', ckpt_path)
-        ckpt = torch.load(ckpt_path)
+        ckpt = torch.load(ckpt_path, map_location=device)
 
-        # # if not (args.ft_path is not None and args.ft_path!='None'):
-        # start = ckpt['global_step']
-        # optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        # optimizer_nerf.load_state_dict(ckpt['optimizer_nerf_state_dict'])
-
-        # Load model
         model.load_state_dict(ckpt['network_fn_state_dict'])
         model_mmray.load_state_dict(ckpt['mmr_network_fn_state_dict'])
         model_refine.load_state_dict(ckpt['refine_net_state_dict'])
         model_fine.load_state_dict(ckpt['network_fine_state_dict'])
 
-    # export to onnx
+    # Export ONNX modules used to build the TensorRT engines.
     model2onnx(model_fine, in_ch = [input_ch, input_ch_views], savedir = os.path.join(args.basedir, args.expname), model_name='nerf', batch_size=1)
-    # model2onnx(model_mmray, in_ch = (6) * args.N_point_ray_enc, savedir = os.path.join(args.basedir, args.expname), model_name='minmaxrays_net',batch_size=1)
-    # model2onnx(model_refine, in_ch = (3*args.num_neighbor) * args.N_samples + 6*(args.N_samples), savedir = os.path.join(args.basedir, args.expname), model_name='refine_net',batch_size=1)
-    ##########################
+    model2onnx(model_mmray, in_ch = (6) * args.N_point_ray_enc, savedir = os.path.join(args.basedir, args.expname), model_name='minmaxrays_net',batch_size=1)
+    model2onnx(model_refine, in_ch = (3*args.num_neighbor) * args.N_samples + 6*(args.N_samples), savedir = os.path.join(args.basedir, args.expname), model_name='refine_net',batch_size=1)
 
-    # # TRT Engine
+    # TensorRT engines are optional; PyTorch inference is still supported.
     nerf_engine, mm_engine, refine_engine = None, None, None
     if args.use_trt:
+        if TRT_IMPORT_ERROR is not None:
+            raise ImportError(
+                "TensorRT inference requested, but TensorRT/PyCUDA imports failed. "
+                "Install requirements-trt.txt and verify CUDA/TensorRT paths."
+            ) from TRT_IMPORT_ERROR
         nerf_engine =  NeRFEngine(os.path.join(args.basedir, args.expname, 'nerf_fp16.trt'))
         mm_engine = MMEngine(os.path.join(args.basedir, args.expname, 'minmaxrays_net_fp16.trt'))
         refine_engine = RefineEngine(os.path.join(args.basedir, args.expname, 'refine_net_fp16.trt'))
-    else:
+    elif flops_counter is not None:
         model_mmray = flops_counter.add_flops_counting_methods(model_mmray)
         model_refine = flops_counter.add_flops_counting_methods(model_refine)
         model_fine = flops_counter.add_flops_counting_methods(model_fine)
@@ -556,7 +525,7 @@ def create_nerf(args):
         'refine_engine':refine_engine,
         'num_neighbor': args.num_neighbor,
         'use_trt': args.use_trt,
-        'count_flops': not args.use_trt,
+        'count_flops': (not args.use_trt) and flops_counter is not None,
 
     }
 
@@ -627,7 +596,6 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     return rgb_map, disp_map, acc_map, weights, depth_map
 
-# @profile
 def render_rays(ray_batch, or_ray_batch,
                 network_fn,
                 network_query_fn,
@@ -659,13 +627,14 @@ def render_rays(ray_batch, or_ray_batch,
     else:
         _, mm_density_add, mm_density_mul, depth_values = min_max_ray_net(kwargs['mm_input'])
 
-    depth_values = depth_values * (far - near) + near  # B, Nsamples, H, W
+    # Stage-1 sampler output is sorted before refinement and volume rendering.
+    depth_values = depth_values * (far - near) + near
     sort_out = torch.sort(depth_values, dim=-1)
-    depth_values = sort_out[0]  # ! depth values are sorted, ndc space
+    depth_values = sort_out[0]
     mm_density_add = torch.gather(mm_density_add, dim =1, index = sort_out[1])
     mm_density_mul = torch.gather(mm_density_mul, dim =1, index = sort_out[1])
 
-    depth_values_3d = 1/(1-depth_values - 1e-5)  #! convert ndc zval to 3d zval
+    depth_values_3d = 1/(1-depth_values - 1e-5)
     num_pts = N_samples
     num_neighbor = kwargs['num_neighbor']
     k_ref = kwargs['num_neighbor']
@@ -674,7 +643,7 @@ def render_rays(ray_batch, or_ray_batch,
     ro1 = kwargs['ro1']
     rd1 = kwargs['rd1']
 
-    # ! warp H and W will be 1, N_rays
+    # Project sparse samples into source views to form epipolar features.
     warp_H = 1
     warp_W = N_rays
     depths = depth_values_3d[None,None,:,:].expand(k_ref,-1,-1,-1) # k_ref, H, W, N_point_ray_enc
@@ -688,6 +657,7 @@ def render_rays(ray_batch, or_ray_batch,
     plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:, None, :].repeat(1, num_pts, 1)) # nump_pts + origin
     plucker_embed = plucker_embed.view(-1, num_pts, 6).view(N_rays, -1)
 
+    # The refinement network adjusts sampler depths and offsets before NeRF rendering.
     refine_input = torch.cat([plucker_embed, epi_features], dim =1)
 
 
@@ -707,14 +677,14 @@ def render_rays(ray_batch, or_ray_batch,
     epi_z_vals = refine_depth_values
 
     query_points_nerf = rays_o[..., None, :] + rays_d[..., None,
-                                                    :] * epi_z_vals[..., :, None]  # ! this is ndc space
+                                                    :] * epi_z_vals[..., :, None]
     query_points_nerf = query_points_nerf + (1e-2)*points_offset
 
 
     if kwargs['use_trt']:
         flat_query_points = query_points_nerf.view(-1, 3)
         embed_xyz = embed_fn(flat_query_points).flatten()
-        kwargs['nerf_engine'].bind_input(embed_xyz) # bind query points to nerf
+        kwargs['nerf_engine'].bind_input(embed_xyz)
         raw = kwargs['nerf_engine'].run()
         raw = raw.view(N_rays, N_samples, -1)
     else:
@@ -730,6 +700,8 @@ def train():
 
     parser = config_parser()
     args = parser.parse_args()
+    if args.dataset_type != 'llff':
+        raise ValueError('This cleaned release supports only dataset_type=llff.')
 
     # Load data
     K = None
@@ -751,8 +723,6 @@ def train():
         i_val = i_test
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if
                         (i not in i_test and i not in i_val)])
-        # i_train = np.array([i for i in np.arange(int(images.shape[0])) if
-        #                 (i not in i_test and i not in i_val and i!=23 and i!=25)])
 
         print('DEFINING BOUNDS')
         if args.no_ndc:
@@ -763,47 +733,6 @@ def train():
             near = 0.
             far = 1.
         print('NEAR FAR', near, far)
-
-    elif args.dataset_type == 'blender':
-        images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
-        print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
-        i_train, i_val, i_test = i_split
-
-        near = 2.
-        far = 6.
-
-        if args.white_bkgd:
-            images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
-        else:
-            images = images[...,:3]
-
-    elif args.dataset_type == 'LINEMOD':
-        images, poses, render_poses, hwf, K, i_split, near, far = load_LINEMOD_data(args.datadir, args.half_res, args.testskip)
-        print(f'Loaded LINEMOD, images shape: {images.shape}, hwf: {hwf}, K: {K}')
-        print(f'[CHECK HERE] near: {near}, far: {far}.')
-        i_train, i_val, i_test = i_split
-
-        if args.white_bkgd:
-            images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
-        else:
-            images = images[...,:3]
-
-    elif args.dataset_type == 'deepvoxels':
-
-        images, poses, render_poses, hwf, i_split = load_dv_data(scene=args.shape,
-                                                                 basedir=args.datadir,
-                                                                 testskip=args.testskip)
-
-        print('Loaded deepvoxels', images.shape, render_poses.shape, hwf, args.datadir)
-        i_train, i_val, i_test = i_split
-
-        hemi_R = np.mean(np.linalg.norm(poses[:,:3,-1], axis=-1))
-        near = hemi_R-1.
-        far = hemi_R+1.
-
-    else:
-        print('Unknown dataset type', args.dataset_type, 'exiting')
-        return
 
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -836,6 +765,9 @@ def train():
 
     # Create nerf model
     _, render_kwargs_test, start, _, _, _ = create_nerf(args)
+    if args.export_only:
+        print('Exported ONNX models; export_only requested, skipping render.')
+        return
 
     bds_dict = {
         'near' : near,
@@ -846,15 +778,10 @@ def train():
 
     # Move testing data to GPU
     render_poses = torch.Tensor(render_poses).to(device)
-    # images = torch.Tensor(images)
     poses = torch.Tensor(poses).to(device)
 
-    # update train val id
     K_ten = torch.Tensor(K.copy()).to(device)
     render_kwargs_test['i_train'] = i_train
-
-    # render_kwargs_test['images'] = images[i_train]
-    # render_kwargs_test['poses'] = poses[i_train]
 
     render_kwargs_test['images'] = images[i_ref]
     render_kwargs_test['poses'] = poses[i_ref]
@@ -864,32 +791,17 @@ def train():
     testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
         'test' if args.render_test else 'path', start))
     os.makedirs(testsavedir, exist_ok=True)
-
-    os.makedirs(testsavedir, exist_ok=True)
+    if args.max_images is not None:
+        i_test = i_test[:args.max_images]
     print('test poses shape', poses[i_test].shape)
     with torch.no_grad():
         render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
     print('Saved test set')
 
 
-    # with torch.no_grad():
-    #     r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
-    #     rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
-    # print('Done, saving', rgbs1.shape)
-
-    # testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
-    #     'test' if args.render_test else 'path', start))
-    # os.makedirs(testsavedir, exist_ok=True)
-    # moviebase = os.path.join(
-    #     testsavedir, '{}_spiral_'.format(expname))
-
-    # imageio.mimwrite(moviebase + 'rgb1.mp4',
-    #                     to8b(rgbs1), fps=30, quality=8)
-    # imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
-    #                     np.percentile(depths, 99)), fps=30, quality=8)
-
 
 if __name__=='__main__':
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    if torch.cuda.is_available():
+        torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     train()

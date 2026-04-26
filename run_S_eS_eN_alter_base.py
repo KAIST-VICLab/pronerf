@@ -1,10 +1,7 @@
 import os
 import sys
 
-gpu_n = '1'
-os.environ['CUDA_VISIBLE_DEVICES'] = gpu_n  # args.gpu_no
-print(f'Training on GPU {gpu_n}')
-import cv2
+print(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
 
 import numpy as np
 import imageio
@@ -16,18 +13,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm, trange
 import inverse_warp
-import math
-import lpips
 
 import matplotlib.pyplot as plt
 
 from run_nerf_helpers import *
 
 from load_llff import load_llff_data
-from load_deepvoxels import load_dv_data
-from load_blender import load_blender_data
-from load_LINEMOD import load_LINEMOD_data
-from load_kaist import load_kaist_data
 
 t1, t2 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
 
@@ -92,10 +83,6 @@ def config_parser():
                         help='do not reload weights from saved ckpt')
     parser.add_argument("--ft_path", type=str, default=None,
                         help='specific weights npy file to reload for coarse network')
-    parser.add_argument("--pretrain_path", type=str, default=None,
-                        help='specific weights npy file to reload pretrain network')
-    parser.add_argument("--pretrain_depth_path", type=str, default=None,
-                        help='specific weights npy file to reload pretrain depth')
     parser.add_argument("--num_neighbor", type=int, default=4,
                         help='num neighbor frames')
 
@@ -142,19 +129,9 @@ def config_parser():
 
     # dataset options
     parser.add_argument("--dataset_type", type=str, default='llff',
-                        help='options: llff / blender / deepvoxels')
-    parser.add_argument("--testskip", type=int, default=8,
-                        help='will load 1/N images from test/val sets, useful for large datasets like deepvoxels')
-
-    # deepvoxels flags
-    parser.add_argument("--shape", type=str, default='greek',
-                        help='options : armchair / cube / greek / vase')
-
-    # blender flags
+                        help='dataset loader; this release supports llff')
     parser.add_argument("--white_bkgd", action='store_true',
-                        help='set to render synthetic data on a white bkgd (always use for dvoxels)')
-    parser.add_argument("--half_res", action='store_true',
-                        help='load blender synthetic data at 400x400 instead of 800x800')
+                        help='render with a white background')
 
     # llff flags
     parser.add_argument("--factor", type=int, default=8,
@@ -181,6 +158,8 @@ def config_parser():
                         help='frequency of testset saving')
     parser.add_argument("--i_video", type=int, default=10000,
                         help='frequency of render_poses video saving')
+    parser.add_argument("--max_steps", type=int, default=None,
+                        help='optional number of optimization steps to run; useful for smoke tests')
 
     return parser
 
@@ -200,16 +179,13 @@ def batchify(fn, chunk):
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024 * 64):
     """Prepares inputs and applies network 'fn'.
     """
-    # inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
-    # embedded = embed_fn(inputs_flat)
-
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat[:, 0:3])
-    if inputs_flat.shape[1] > 3: # add epipolar features
+    if inputs_flat.shape[1] > 3:
         embedded = torch.cat((embedded, inputs_flat[:, 3::]), -1)
 
     if viewdirs is not None:
-        input_dirs = viewdirs[:, None].repeat(1, inputs.shape[1], 1)#.expand(inputs.shape)
+        input_dirs = viewdirs[:, None].repeat(1, inputs.shape[1], 1)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = torch.cat([embedded, embedded_dirs], -1)
@@ -327,25 +303,14 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     depths = []
     psnrs = []
     psnrs0 = []
-    ssims = []
-    lpips_res = []
     mm_rgbs = []
     depths0 = []
-    # debug_rgb = torch.from_numpy(np.load('test_imgs.npy')).to(device)
-    # imgfiles = ['logs_minmax/pred/000.png','logs_minmax/pred/001.png','logs_minmax/pred/002.png']
-    # debug_rgb = [imageio.imread(f)[...,:3]/255. for f in imgfiles]
-    img2mse_np = lambda x, y: np.mean((x - y) ** 2)
-    mse2psnr_np = lambda x: -10. * np.log(x) / np.log([10.])
     render_kwargs['train_nerf'] = True
     render_kwargs['train_sampler'] = True
-    lpips_vgg = lpips.LPIPS(net="vgg").cuda()
-    lpips_vgg = lpips_vgg.eval()
 
     t = time.time()
     for i, c2w in enumerate(tqdm(render_poses)):
-        # print(i, time.time() - t)
-        # t = time.time()
-        # ! compute nearest id
+        # Use the nearest training poses as source views for epipolar projection.
         poses_train = render_kwargs['poses_np']
         dists = np.sum(np.square(c2w.cpu().numpy()[:3, 3] - poses_train[:, :3, 3]), -1)
 
@@ -372,21 +337,6 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             p = mse2psnr(img2mse(rgb0, gt_imgs[i]))
             psnrs0.append(p)
 
-            error = (rgb1 - gt_imgs[i]) ** 2
-            error = error.cpu().numpy()
-            error = (error - np.min(error)) / (max(np.max(error) - np.min(error), 1e-8))
-            error = cv2.applyColorMap((error * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
-
-            # # ssims
-            # ssim = img2ssim(rgb1.permute(2, 0, 1)[None], (gt_imgs[i]).permute(2, 0, 1)[None].cuda())
-            # ssims.append(ssim.cpu().numpy())
-
-            # # lpips
-            # scaled_gt = (gt_imgs[i]).permute(2, 0, 1)[None] * 2.0 - 1.0
-            # scaled_pred = rgb1.permute(2, 0, 1)[None] * 2.0 - 1.0
-            # lpips_val = lpips_vgg(scaled_gt.cuda(), scaled_pred.cuda())
-            # lpips_res.append(lpips_val.detach().squeeze().cpu().numpy())
-
         if savedir is not None:
             rgb8 = to8b(rgbs1[-1])
             filename = os.path.join(savedir, '{:03d}.png'.format(i))
@@ -396,24 +346,13 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             filename = os.path.join(savedir, 'rgb0_{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
-            # rgb8 = to8b(mm_rgbs[-1])
-            # filename = os.path.join(savedir, 'rgb00_{:03d}.png'.format(i))
-            # imageio.imwrite(filename, rgb8)
-
             rgb8 = to8b(depths[-1]/np.max(depths[-1]))
             filename = os.path.join(savedir, 'depth_{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
 
-            # rgb8 = to8b(depths0[-1]/np.max(depths0[-1]))
-            # filename = os.path.join(savedir, 'depth0_{:03d}.png'.format(i))
-            # imageio.imwrite(filename, rgb8)
-
             rgb8 = to8b(gt_imgs[i].cpu().numpy())
             filename = os.path.join(savedir, 'gt_{:03d}.png'.format(i))
             imageio.imwrite(filename, rgb8)
-
-            # filename = os.path.join(savedir, 'err{:03d}.png'.format(i))
-            # imageio.imwrite(filename, error)
 
     rgbs0 = np.stack(rgbs0, 0)
     rgbs1 = np.stack(rgbs1, 0)
@@ -430,9 +369,6 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
             mean_psnr = mean_psnr + this_psnr / len(psnrs0)
         print(psnrs0)
         print(f'Mean Test PSNR {mean_psnr.detach().item()}')
-    # breakpoint()
-    # print('LPIPS', np.array(lpips_res).mean())
-    # print('SSIMS', np.array(ssims).mean())
     return rgbs0, rgbs1, depths, depths
 
 
@@ -458,10 +394,7 @@ def create_nerf(args):
         model = NeRF(D=args.netdepth, W=args.netwidth,
                      input_ch=input_ch, output_ch=output_ch, skips=skips,
                      input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs)
-        # model = DoNeRF(D=args.netdepth, W=args.netwidth,
-        #              n_in=input_ch + input_ch_views, n_out=output_ch, skip='auto')
     model.to(device)
-    # model.load_state_dict(pretrain_ckpt['network_fn_state_dict'])
     grad_vars.append({'params': model.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     network_query_fn = lambda inputs, viewdirs, network_fn: run_network(inputs, viewdirs, network_fn,
@@ -469,9 +402,7 @@ def create_nerf(args):
                                                                         embeddirs_fn=embeddirs_fn,
                                                                         netchunk=args.netchunk)
 
-    # Sampler and sampler optimizers
     s_grad_vars = []
-    # Uncomment for simultanious training
     s_grad_vars.append({'params': model.parameters(), 'weight_decay': args.weight_decay, 'lr': args.lrate})
 
     model_mmray = MinMaxRay_Net(D=args.mmnetdepth, W=args.mmnetwidth,
@@ -494,8 +425,6 @@ def create_nerf(args):
     basedir = args.basedir
     expname = args.expname
 
-    ##########################
-
     # Load checkpoints
     if args.ft_path is not None and args.ft_path != 'None':
         ckpts = [args.ft_path]
@@ -506,18 +435,15 @@ def create_nerf(args):
     if len(ckpts) > 0 and not args.no_reload:
         ckpt_path = ckpts[-1]
         print('Reloading from', ckpt_path)
-        ckpt = torch.load(ckpt_path)
+        ckpt = torch.load(ckpt_path, map_location=device)
 
         start = ckpt['global_step']
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         s_optimizer.load_state_dict(ckpt['s_optimizer_state_dict'])
 
-        # Load model
         model.load_state_dict(ckpt['network_fn_state_dict'])
         model_mmray.load_state_dict(ckpt['mmr_network_fn_state_dict'])
         model_refine.load_state_dict(ckpt['refine_net_state_dict'])
-
-    ##########################
 
     render_kwargs_train = {
         'network_query_fn': network_query_fn,
@@ -562,24 +488,10 @@ def compute_query_points_from_rays(
         N_point_ray_enc,
         randomize=True
 ) -> (torch.Tensor, torch.Tensor):
-    # Linear
+    # ProNeRF encodes each ray by fixed samples before predicting sparse depths.
     depth_values = torch.linspace(
         near_thresh, far_thresh, N_point_ray_enc).to(ray_origins)
     depth_values = depth_values.unsqueeze(0)
-
-    # # Exp.
-    # depth_values = torch.linspace(1.0, 0.0, steps=N_point_ray_enc).view(1, -1).type_as(ray_origins)
-    # depth_values = near_thresh * torch.exp(math.log(far_thresh / (near_thresh + 1e-6)) * (1-depth_values))
-
-    # if randomize is True:
-    #     noise_shape = list(depth_values.shape)
-    #     noise_ = (1 / 6) * torch.normal(0.0, 1.0,
-    #                                     size=noise_shape).to(ray_origins)
-    #     noise_ = noise_ * (far_thresh - near_thresh) / N_point_ray_enc
-    #     depth_values = noise_ + depth_values
-    #     depth_values[depth_values < near_thresh] = near_thresh
-    #     depth_values[depth_values > far_thresh] = far_thresh
-    #     depth_values, _ = torch.sort(depth_values, dim=-1)
 
     query_points = ray_origins[..., None, :] + \
                    ray_directions[..., None, :] * depth_values[..., :, None]
@@ -622,13 +534,10 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
 
     if mm_density_add is not None:
         alpha = raw2alpha(raw[..., 3] + noise + mm_density_add, dists)  # [N_rays, N_samples]
-        # if iter > 200000:
         alpha = alpha * torch.relu(mm_density_mul)
-            # alpha = alpha*torch.sigmoid(mm_density_mul)
         
     else:
         alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
-    # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1. - alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[..., None] * rgb, -2)  # [N_rays, 3]
 
@@ -675,16 +584,9 @@ def render_rays(ray_batch, or_ray_batch,
         pts, _ = compute_query_points_from_rays(
             rays_o, rays_d, 0., 1., N_point_ray_enc, randomize=False)  # ! this is ndc space
 
-    # 1. mm take point encoding and predict N samples points
+    # Projection-aware sampler: predict sparse candidate depths from Plucker ray features.
     plucker_pts = kwargs['embed_rays'](pts, rays_d[:, None, :].repeat(1, N_point_ray_enc, 1))  # nump_pts + origin
     plucker_pts = plucker_pts.view(-1, (N_point_ray_enc) * 6)
-
-    # plucker_pts = kwargs['embed_rays'](torch.zeros_like(rays_o[:, None, :].repeat(1, N_point_ray_enc, 1)), pts)
-    # plucker_pts = plucker_pts.view(-1, (N_point_ray_enc) * 6)
-
-    # plucker_pts = kwargs['embed_rays'](pts, rays_d[:, None, :].repeat(1, N_point_ray_enc, 1))  # nump_pts + origin
-    # plucker_pts = torch.cat([pts, plucker_pts], dim =-1)
-    # plucker_pts = plucker_pts.view(-1, (N_point_ray_enc) * 9)
 
 
     if train_sampler:
@@ -696,17 +598,11 @@ def render_rays(ray_batch, or_ray_batch,
     mm_density_add = min_max_rays[:, N_samples:2*N_samples]
     mm_density_mul = min_max_rays[:, 2*N_samples:3*N_samples]
 
-    # color_shift = min_max_rays[:,3 * N_samples+3:4 * N_samples+3].view(N_rays, N_samples)
-    # color_scale = min_max_rays[:,4 * N_samples+3:].view(N_rays, N_samples)
-
     depth_values = torch.sigmoid(min_max_rays[:, :N_samples]) * (far - near) + near  # B, Nsamples, H, W
     sort_out = torch.sort(depth_values, dim=-1)
     depth_values = sort_out[0]  # ! depth values are sorted, ndc space
     mm_density_add = torch.gather(mm_density_add, dim=1, index=sort_out[1])
     mm_density_mul = torch.gather(mm_density_mul, dim=1, index=sort_out[1])
-
-    # color_shift = torch.gather(color_shift, dim=1, index=sort_out[1])[...,None]
-    # color_scale = torch.gather(color_scale, dim=1, index=sort_out[1])[...,None]
 
     depth_values_3d = 1 / (1 - depth_values - 1e-6)  # ! convert ndc zval to 3d zval
 
@@ -732,12 +628,12 @@ def render_rays(ray_batch, or_ray_batch,
 
         if randomize:
             ref_nos = rel_cam_idx[:, 1:]
-            # Random but keep order, ! remove the first pose
+            # Training uses random neighboring source views while excluding the target view.
             order_idx = torch.from_numpy(np.array(sorted(random.sample(range(ref_nos.shape[1]), num_neighbor)))).to(
                 device)
             ref_nos = torch.gather(ref_nos, dim=1, index=order_idx[None].long().repeat(N_rays, 1))
         else:
-            # Nearest, testing do not remove first pose
+            # Evaluation uses nearest source views deterministically.
             ref_nos = rel_cam_idx[:, 0:num_neighbor]
 
         ref_rgb = (ref_rgbs.permute(0, 3, 1, 2))
@@ -750,8 +646,7 @@ def render_rays(ray_batch, or_ray_batch,
         ref_K = ref_K.unsqueeze(0).repeat(num_pts * k_ref, 1, 1)
         inv_K = torch.inverse(ref_K)
 
-        # This should be with grad enabled??????
-        # ! warp H and W will be 1, N_rays
+        # Project candidate samples into source views to build epipolar color features.
         warp_H = 1
         warp_W = N_rays
         depths = depth_values_3d[None, None, :, :].repeat(k_ref, 1, 1, 1)  # k_ref, H, W, N_point_ray_enc
@@ -774,14 +669,7 @@ def render_rays(ray_batch, or_ray_batch,
     plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:, None, :].repeat(1, num_pts, 1)) # nump_pts + origin
     plucker_embed = plucker_embed.view(-1, num_pts, 6)
 
-    # plucker_embed = kwargs['embed_rays'](torch.zeros_like(rays_o[:, None, :].repeat(1, num_pts, 1)), epi_pts)
-    # plucker_embed = plucker_embed.view(-1, num_pts, 6)
-
-    # plucker_embed = kwargs['embed_rays'](epi_pts, rays_d[:, None, :].repeat(1, num_pts, 1)) # nump_pts + origin
-    # plucker_embed = torch.cat([plucker_embed, epi_pts], dim =-1)
-    # plucker_embed = plucker_embed.view(-1, num_pts, 6 + 3)
-    
-    # plucker_embed = torch.cat((rays_o[:,None], rays_d[:,None], epi_pts), 1).view(-1, 6 + num_pts * 3)
+    # The refinement network uses projected source colors to adjust depths and offsets.
     net_input = torch.cat((plucker_embed.view(N_rays, -1), epi_features.view(N_rays, -1)), -1)
 
     if train_sampler:
@@ -823,7 +711,7 @@ def render_rays(ray_batch, or_ray_batch,
         else:
             epi_z_vals = refine_depth_values
 
-        # Explore bewteen predicted samples
+        # Explore around predicted samples while the NeRF branch is still adapting.
         noise_shape = [N_rays, N_samples]
         max_noise = 0.99
         min_noise = 0.01
@@ -840,10 +728,9 @@ def render_rays(ray_batch, or_ray_batch,
             noise_ = -noise_ * epi_z_vals_diff
         refine_depth_values = epi_z_vals + noise_
 
-    # ! this is ndc space
     query_points_nerf = rays_o[..., None, :] + rays_d[..., None, :] * refine_depth_values[..., :, None]
 
-    # add point offset
+    # Add small learned offsets to move sparse samples toward local radiance detail.
     iter = kwargs.get('iter', 1e6)
     if train_sampler: # and iter >= 30000:
         query_points_nerf = query_points_nerf + (1e-2) * points_offset
@@ -877,6 +764,8 @@ def render_rays(ray_batch, or_ray_batch,
 def train():
     parser = config_parser()
     args = parser.parse_args()
+    if args.dataset_type != 'llff':
+        raise ValueError('This cleaned release supports only dataset_type=llff.')
 
     # Load data
     K = None
@@ -909,81 +798,6 @@ def train():
             near = 1e-6
             far = 1.
         print('NEAR FAR', near, far)
-
-    elif args.dataset_type == 'kaist':
-        images, poses, bds, render_poses, i_test = load_kaist_data(args.datadir, args.factor,
-                                                                  recenter=True, bd_factor=.75,
-                                                                  spherify=args.spherify)
-        if poses.shape[0] > 80:
-            poses = poses[:80]
-            images = images[:80]
-        hwf = poses[0, :3, -1]
-        poses = poses[:, :3, :4]
-        
-        print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
-        if not isinstance(i_test, list):
-            i_test = [i_test]
-
-        # if args.llffhold > 0:
-        #     print('Auto LLFF holdout,', args.llffhold)
-        #     i_test = np.arange(images.shape[0])[::args.llffhold]
-        i_test =  args.test_frames
-
-        i_val = i_test
-        i_train = np.array([i for i in np.arange(int(images.shape[0])) if
-                            (i not in i_test and i not in i_val)])
-
-        print('DEFINING BOUNDS')
-        if args.no_ndc:
-            near = np.ndarray.min(bds) * .9
-            far = np.ndarray.max(bds) * 1.
-
-        else:
-            near = 1e-6
-            far = 1.
-        print('NEAR FAR', near, far)
-
-    elif args.dataset_type == 'blender':
-        images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
-        print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
-        i_train, i_val, i_test = i_split
-
-        near = 2.
-        far = 6.
-
-        if args.white_bkgd:
-            images = images[..., :3] * images[..., -1:] + (1. - images[..., -1:])
-        else:
-            images = images[..., :3]
-
-    elif args.dataset_type == 'LINEMOD':
-        images, poses, render_poses, hwf, K, i_split, near, far = load_LINEMOD_data(args.datadir, args.half_res,
-                                                                                    args.testskip)
-        print(f'Loaded LINEMOD, images shape: {images.shape}, hwf: {hwf}, K: {K}')
-        print(f'[CHECK HERE] near: {near}, far: {far}.')
-        i_train, i_val, i_test = i_split
-
-        if args.white_bkgd:
-            images = images[..., :3] * images[..., -1:] + (1. - images[..., -1:])
-        else:
-            images = images[..., :3]
-
-    elif args.dataset_type == 'deepvoxels':
-
-        images, poses, render_poses, hwf, i_split = load_dv_data(scene=args.shape,
-                                                                 basedir=args.datadir,
-                                                                 testskip=args.testskip)
-
-        print('Loaded deepvoxels', images.shape, render_poses.shape, hwf, args.datadir)
-        i_train, i_val, i_test = i_split
-
-        hemi_R = np.mean(np.linalg.norm(poses[:, :3, -1], axis=-1))
-        near = hemi_R - 1.
-        far = hemi_R + 1.
-
-    else:
-        print('Unknown dataset type', args.dataset_type, 'exiting')
-        return
 
     # Cast intrinsics to right types
     H, W, focal = hwf
@@ -1028,29 +842,6 @@ def train():
     # Move testing data to GPU
     render_poses = torch.Tensor(render_poses).to(device)
 
-    # # Short circuit if only rendering out from trained model
-    # if args.render_only:
-    #     print('RENDER ONLY')
-    #     with torch.no_grad():
-    #         if args.render_test:
-    #             # render_test switches to test poses
-    #             images = torch.Tensor(images[i_test]).to(device)
-    #         else:
-    #             # Default is smoother render_poses path
-    #             images = None
-
-    #         testsavedir = os.path.join(basedir, expname,
-    #                                    'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
-    #         os.makedirs(testsavedir, exist_ok=True)
-    #         print('test poses shape', render_poses.shape)
-
-    #         render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir,
-    #                     render_factor=args.render_factor)
-    #         print('Done rendering', testsavedir)
-    #         # imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
-
-    #         return
-
     # Prepare raybatch tensor if batching random rays
     N_rand = args.N_rand
     use_batching = not args.no_batching
@@ -1065,7 +856,7 @@ def train():
         rays_rgb = np.reshape(rays_rgb, [-1, 3, 3])  # [(N-1)*H*W, ro+rd+rgb + img_id, 3]
         rays_rgb = rays_rgb.astype(np.float32)
 
-        # ! compute nearest id
+        # Precompute source-view neighbors for each target training ray.
         poses_train = poses[i_train]
         render_kwargs_test['poses_np'] = poses_train
         rays_nearest_id = []
@@ -1094,6 +885,8 @@ def train():
         rays_nearest_id = torch.Tensor(rays_nearest_id).to(device)
 
     N_iters = 500000 + 1
+    if args.max_steps is not None:
+        N_iters = start + args.max_steps + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
@@ -1128,7 +921,7 @@ def train():
             rays_nearest_id = rays_nearest_id[rand_idx]
             i_batch = 0
 
-        #####  Core optimization loop  #####
+        # Core optimization loop.
         render_kwargs_train['iter'] = i
         render_kwargs_test['iter'] = i
         render_kwargs_train['batch_rays_nearest_id'] = batch_rays_nearest_id
@@ -1155,25 +948,16 @@ def train():
             img_loss = img2mse(rgb1, target_s)
             rgb0_loss = img2mse(rgb0, target_s)
             mm_rgb_loss = img2mse(extras['mm_rgb'], target_s)
-            aux_rgb_loss = 0#img2mse(extras['aux_rgb'], target_s)
+            aux_rgb_loss = 0
 
             sigma_loss = 0
-            # if i < 30000:
-            #     sigma_loss = (1e-5) * (-(extras['sigma1']).mean())  # sigma loss for density
-            #     # sigma_loss += (1e-5) * (-(extras['sigma0']).mean())  # sigma loss for density
-            # elif i > 130000:
-            #     sigma_loss = 0
-            # else:
-            #     sigma_loss = (1e-6) * (-(extras['sigma1']).mean())  # sigma loss for density
-            #     # sigma_loss += (1e-6) * (-(extras['sigma0']).mean())  # sigma loss for density
 
             loss = img_loss + rgb0_loss + sigma_loss + mm_rgb_loss + aux_rgb_loss
             psnr = mse2psnr(img_loss)
             loss.backward()
             s_optimizer.step()
 
-        # NOTE: IMPORTANT!
-        ###   update learning rate   ###
+        # Decay both the NeRF and sampler optimizers on the same schedule.
         decay_rate = 0.1
         decay_steps = args.lrate_decay * 1000
         new_lrate = args.lrate * (decay_rate ** ((global_step/2) / decay_steps))
@@ -1181,13 +965,6 @@ def train():
             param_group['lr'] = new_lrate
         for param_group in s_optimizer.param_groups:
             param_group['lr'] = new_lrate
-        ################################
-
-        # dt = time.time() - time0
-        # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
-        #####           end            #####
-
-        # Rest is logging
         if i % args.i_weights == 0:
             print(f'New learning rate: {new_lrate}')
             path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
@@ -1200,34 +977,6 @@ def train():
                 's_optimizer_state_dict': s_optimizer.state_dict(),
             }, path)
             print('Saved checkpoints at', path)
-
-        # if (i % args.i_video == 0 and i > 0) or (args.render_only):
-        #     # Turn on testing mode
-        #     with torch.no_grad():
-        #         r_out = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
-        #         rgbs0, rgbs1, depths, depths0 = r_out[0], r_out[1], r_out[2], r_out[3]
-        #     print('Done, saving', rgbs0.shape)
-        #     if args.render_only:
-        #         testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(
-        #             'test' if args.render_test else 'path', start))
-        #         os.makedirs(testsavedir, exist_ok=True)
-        #         moviebase = os.path.join(
-        #             testsavedir, '{}_spiral_{:06d}_'.format(expname, i))
-        #     else:
-        #         moviebase = os.path.join(
-        #             basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-        #     imageio.mimwrite(moviebase + 'rgb0.mp4',
-        #                      to8b(rgbs0), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'rgb1.mp4',
-        #                      to8b(rgbs1), fps=30, quality=8)
-        #     # imageio.mimwrite(moviebase + 'mean_warps.mp4', to8b(mean_warps), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'depth.mp4', to8b(depths /
-        #                      np.percentile(depths, 99)), fps=30, quality=8)
-        #     imageio.mimwrite(moviebase + 'depth0.mp4', to8b(depths0 /
-        #                      np.percentile(depths0, 99)), fps=30, quality=8)
-        #     # print(f'Mean depth {np.mean(depths)}')
-        #     if args.render_only:
-        #         return
 
         if (i % args.i_testset == 0 and i > 0) or (args.render_test):
             if args.render_test:
@@ -1251,6 +1000,7 @@ def train():
 
 
 if __name__ == '__main__':
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    if torch.cuda.is_available():
+        torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     train()
